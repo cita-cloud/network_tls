@@ -50,12 +50,15 @@ pub struct Peer {
     host: String,
     port: u16,
 
-    inbound_stream_rx: mpsc::Receiver<ServerTlsStream>,
+    tls_config: Arc<ClientConfig>,
+    reconnect_timeout: u64,
 
     // msg to send to this peer
     outbound_msg_rx: mpsc::Receiver<NetworkMsg>,
     // msg received from this peer
     inbound_msg_tx: mpsc::Sender<NetworkMsg>,
+
+    inbound_stream_rx: mpsc::Receiver<ServerTlsStream>,
 }
 
 impl Peer {
@@ -64,6 +67,8 @@ impl Peer {
         domain: &str,
         host: &str,
         port: u16,
+        tls_config: Arc<ClientConfig>,
+        reconnect_timeout: u64,
         inbound_msg_tx: mpsc::Sender<NetworkMsg>,
     ) -> (Peer, PeerHandle) {
         let (inbound_stream_tx, inbound_stream_rx) = mpsc::channel(1);
@@ -74,9 +79,11 @@ impl Peer {
             domain: domain.into(),
             host: host.into(),
             port,
-            inbound_stream_rx,
+            tls_config,
+            reconnect_timeout,
             outbound_msg_rx,
             inbound_msg_tx,
+            inbound_stream_rx,
         };
         let handle = PeerHandle {
             id,
@@ -87,46 +94,47 @@ impl Peer {
         (peer, handle)
     }
 
-    pub async fn run(mut self, tls_config: Arc<ClientConfig>) {
+    pub async fn run(mut self) {
         let mut framed: Option<Framed> = None;
-        let mut pending_conn: Option<JoinHandle<ClientTlsStream>> = None;
+        let mut pending_conn: Option<JoinHandle<Result<ClientTlsStream, std::io::Error>>> = None;
 
-        let reconnect_timeout = time::sleep(Duration::from_secs(0));
-        tokio::pin!(reconnect_timeout);
+        let reconnect_timeout = Duration::from_secs(self.reconnect_timeout);
+        let reconnect_timeout_fut = time::sleep(Duration::from_secs(0));
+        tokio::pin!(reconnect_timeout_fut);
 
         loop {
             tokio::select! {
-                _ = reconnect_timeout.as_mut(), if framed.is_none() && pending_conn.is_none() => {
+                _ = reconnect_timeout_fut.as_mut(), if framed.is_none() && pending_conn.is_none() => {
                     // try to connect
                     let host = self.host.clone();
                     let port = self.port;
-                    let domain = self.domain.clone();
-                    let tls_config = tls_config.clone();
+
+                    let domain = DNSNameRef::try_from_ascii_str(&self.domain).unwrap().to_owned();
+                    let tls_config = self.tls_config.clone();
 
                     let handle = tokio::spawn(async move {
                         let connector = TlsConnector::from(tls_config);
-                        let domain = DNSNameRef::try_from_ascii_str(&domain).unwrap();
 
-                        let tcp = TcpStream::connect((host.as_str(), port)).await.unwrap();
-                        connector.connect(domain, tcp).await.unwrap()
+                        let tcp = TcpStream::connect((host.as_str(), port)).await?;
+                        connector.connect(domain.as_ref(), tcp).await
                     });
 
                     pending_conn.replace(handle);
                 }
-                result = async { pending_conn.as_mut().unwrap().await }, if pending_conn.is_some() => {
+                Ok(conn_result) = async { pending_conn.as_mut().unwrap().await }, if pending_conn.is_some() => {
                     pending_conn.take();
-                    match result {
+
+                    match conn_result {
                         Ok(stream) => {
                             println!("new stream connected; {}", self.domain);
                             framed.replace(Framed::new(
                                 tokio_rustls::TlsStream::Client(stream),
-                                Codec::new(64 * 1024 * 1024),
+                                Codec,
                             ));
                         }
-                        Err(_) => {
-                            reconnect_timeout.as_mut().reset(
-                                time::Instant::now() + Duration::from_secs(2)
-                            );
+                        Err(e) => {
+                            println!("cannot connect to peer `{}`, reason: {}", self.domain, e);
+                            reconnect_timeout_fut.as_mut().reset(time::Instant::now() + reconnect_timeout);
                         }
                     }
                 }
@@ -139,7 +147,7 @@ impl Peer {
                         println!("new stream received; {}", self.domain);
                         framed.replace(Framed::new(
                             tokio_rustls::TlsStream::Server(stream),
-                            Codec::new(64 * 1024 * 1024),
+                            Codec
                         ));
                     }
                 }
@@ -149,23 +157,25 @@ impl Peer {
                         if let Err(e) = fd.send(msg).await {
                             println!("send outbound msg failed: {}", e);
                             framed.take();
-                            reconnect_timeout.as_mut().reset(
-                                time::Instant::now() + Duration::from_secs(2)
-                            );
+                            reconnect_timeout_fut.as_mut().reset(time::Instant::now() + reconnect_timeout);
                         }
                     }
                 }
-                Some(result) = async { framed.as_mut().unwrap().next().await }, if framed.is_some() => match result {
-                    Ok(mut msg) => {
-                        msg.origin = self.id;
-                        self.inbound_msg_tx.send(msg).await.unwrap();
+                Some(result) = async { framed.as_mut().unwrap().next().await }, if framed.is_some() => {
+                    match result {
+                        Ok(mut msg) => {
+                            msg.origin = self.id;
+                            let _ = self.inbound_msg_tx.send(msg).await;
+                        }
+                        Err(e) => {
+                            println!("framed stream report error: {}", e);
+                            framed.take();
+                            reconnect_timeout_fut.as_mut().reset(time::Instant::now() + reconnect_timeout);
+                        }
                     }
-                    Err(_) => {
-                        framed.take();
-                        reconnect_timeout.as_mut().reset(
-                            time::Instant::now() + Duration::from_secs(2)
-                        );
-                    }
+                }
+                else => {
+                    println!("Server stoped.");
                 }
             }
         }

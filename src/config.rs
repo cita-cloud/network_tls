@@ -13,6 +13,11 @@ use toml::Value;
 
 use serde::{Deserialize, Serialize};
 
+
+fn default_reconnect_timeout() -> u64 {
+    5
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PeerConfig {
     pub host: String,
@@ -26,11 +31,16 @@ pub struct PeerConfig {
 pub struct NetworkConfig {
     pub grpc_port: u16,
     pub listen_port: u16,
+
+    #[serde(default = "default_reconnect_timeout")]
+    // in seconds
+    pub reconnect_timeout: u64,
+
     pub ca_cert: String,
 
     pub cert: String,
-    #[serde(default)]
-    pub priv_key: Option<String>,
+    // TODO: better security
+    pub priv_key: String,
 
     #[serde(default)]
     // https://github.com/alexcrichton/toml-rs/issues/258
@@ -76,7 +86,7 @@ pub fn generate_config(peer_count: usize) {
     let peers: Vec<PeerConfig> = (0..peer_count)
         .map(|i| {
             let domain = format!("peer{}.fy", i);
-            let port = (30000 + i) as u16;
+            let port = (30000 + i * 1000) as u16;
             PeerConfig {
                 host: "localhost".into(),
                 port,
@@ -90,14 +100,15 @@ pub fn generate_config(peer_count: usize) {
         let mut peers = peers.clone();
         let this = peers.remove(i as usize);
 
-        let (_, cert, key) = cert(&p.domain, &ca_cert);
+        let (_, cert, priv_key) = cert(&p.domain, &ca_cert);
         let config = {
             let network = NetworkConfig {
-                grpc_port: this.port + 10000,
+                grpc_port: (50000 + i * 1000) as u16,
                 listen_port: this.port,
+                reconnect_timeout: default_reconnect_timeout(),
                 ca_cert: ca_cert_pem.clone(),
                 cert,
-                priv_key: Some(key),
+                priv_key,
                 peers,
             };
             Config { network }

@@ -7,11 +7,13 @@ use tokio_util::codec::{Decoder, Encoder};
 
 use crate::proto::NetworkMsg;
 
+const MAX_FRAME_LEN: u32 = 128 * 1024 * 1024;
+
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
     #[error("can't decode msg: {0}")]
     InvalidMsg(#[from] prost::DecodeError),
-    #[error("msg too large: {0}")]
+    #[error("msg too large, expect no more than {}, received {0}", MAX_FRAME_LEN)]
     InvalidLength(usize),
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -25,17 +27,8 @@ pub enum EncodeError {
     Io(#[from] std::io::Error),
 }
 
-#[derive(Debug)]
-pub struct Codec {
-    max_frame_len: usize,
-}
-
-impl Codec {
-    pub fn new(max_frame_len: usize) -> Self {
-        assert!(max_frame_len <= u32::MAX as usize);
-        Self { max_frame_len }
-    }
-}
+#[derive(Debug, Clone, Copy)]
+pub struct Codec;
 
 impl Decoder for Codec {
     type Item = NetworkMsg;
@@ -50,7 +43,7 @@ impl Decoder for Codec {
         let content_len = u32::from_be_bytes(src[..4].try_into().unwrap()) as usize;
         let frame_len = header_len + content_len;
 
-        if frame_len > self.max_frame_len {
+        if frame_len > MAX_FRAME_LEN as usize {
             return Err(DecodeError::InvalidLength(frame_len));
         }
 
@@ -72,7 +65,7 @@ impl Encoder<NetworkMsg> for Codec {
         let encoded_len = item.encoded_len();
         let frame_len = encoded_len + std::mem::size_of::<u32>();
 
-        if frame_len > self.max_frame_len {
+        if frame_len > MAX_FRAME_LEN as usize {
             return Err(EncodeError::FrameLimitExceed(frame_len));
         }
 

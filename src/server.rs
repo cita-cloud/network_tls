@@ -133,7 +133,7 @@ impl Server {
             pemfile::certs(&mut rd).unwrap()
         };
         let priv_key = {
-            let mut rd = BufReader::new(config.priv_key.as_ref().unwrap().as_bytes());
+            let mut rd = BufReader::new(config.priv_key.as_bytes());
             pemfile::pkcs8_private_keys(&mut rd).unwrap().remove(0)
         };
 
@@ -178,15 +178,17 @@ impl Server {
             let mut peers = HashMap::new();
             for (id, c) in config.peers.into_iter().enumerate() {
                 let (peer, handle) = Peer::new(
+                    // start from 1
                     (id + 1) as u64,
                     &c.domain,
                     &c.host,
                     c.port,
+                    client_config.clone(),
+                    config.reconnect_timeout,
                     inbound_msg_tx.clone(),
                 );
-                let client_config = client_config.clone();
                 tokio::spawn(async move {
-                    peer.run(client_config).await;
+                    peer.run().await;
                 });
                 peers.insert(c.domain, handle);
             }
