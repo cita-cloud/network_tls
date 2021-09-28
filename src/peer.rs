@@ -13,6 +13,8 @@ use tokio_rustls::TlsConnector;
 
 use futures::SinkExt;
 
+use tracing::{info, warn};
+
 use crate::codec::Codec;
 use crate::proto::NetworkMsg;
 
@@ -126,14 +128,17 @@ impl Peer {
 
                     match conn_result {
                         Ok(stream) => {
-                            println!("new stream connected; {}", self.domain);
+                            info!(
+                                peer = %self.domain,
+                                r#type = %"outbound",
+                                "new connection established"
+                            );
                             framed.replace(Framed::new(
                                 tokio_rustls::TlsStream::Client(stream),
                                 Codec,
                             ));
                         }
-                        Err(e) => {
-                            println!("cannot connect to peer `{}`, reason: {}", self.domain, e);
+                        Err(_) => {
                             reconnect_timeout_fut.as_mut().reset(time::Instant::now() + reconnect_timeout);
                         }
                     }
@@ -144,7 +149,11 @@ impl Peer {
                     }
                     // receive new stream
                     if framed.is_none() {
-                        println!("new stream received; {}", self.domain);
+                        info!(
+                            peer = %self.domain,
+                            r#type = %"inbound",
+                            "new connection established"
+                        );
                         framed.replace(Framed::new(
                             tokio_rustls::TlsStream::Server(stream),
                             Codec
@@ -155,7 +164,11 @@ impl Peer {
                 Some(msg) = self.outbound_msg_rx.recv() => {
                     if let Some(fd) = framed.as_mut() {
                         if let Err(e) = fd.send(msg).await {
-                            println!("send outbound msg failed: {}", e);
+                            warn!(
+                                peer = %self.domain,
+                                reason = %e,
+                                "send out msg failed, drop connection"
+                            );
                             framed.take();
                             reconnect_timeout_fut.as_mut().reset(time::Instant::now() + reconnect_timeout);
                         }

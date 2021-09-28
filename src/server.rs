@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::io::BufReader;
 use std::sync::Arc;
 
+use tracing::info;
+
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
@@ -227,9 +229,10 @@ impl Server {
     }
 
     async fn serve(self) {
-        let listener = TcpListener::bind(("0.0.0.0", self.listen_port))
-            .await
-            .unwrap();
+        let addr = ("0.0.0.0", self.listen_port);
+        let listener = TcpListener::bind(addr).await.unwrap();
+
+        info!("listen on `{}:{}`", addr.0, addr.1);
 
         loop {
             let (stream, _) = listener.accept().await.unwrap();

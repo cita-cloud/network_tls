@@ -13,7 +13,6 @@ use toml::Value;
 
 use serde::{Deserialize, Serialize};
 
-
 fn default_reconnect_timeout() -> u64 {
     5
 }
