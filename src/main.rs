@@ -43,7 +43,7 @@ fn main() {
                 load_config(path)
             };
             let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async move { Server::new(config).serve().await });
+            rt.block_on(Server::setup(config));
         }
         Some(("gen-config", m)) => {
             let peer_count = m.value_of("peer-count").unwrap().parse::<usize>().unwrap();

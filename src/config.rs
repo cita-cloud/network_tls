@@ -24,6 +24,7 @@ pub struct PeerConfig {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NetworkConfig {
+    pub grpc_port: u16,
     pub listen_port: u16,
     pub ca_cert: String,
 
@@ -92,6 +93,7 @@ pub fn generate_config(peer_count: usize) {
         let (_, cert, key) = cert(&p.domain, &ca_cert);
         let config = {
             let network = NetworkConfig {
+                grpc_port: this.port + 10000,
                 listen_port: this.port,
                 ca_cert: ca_cert_pem.clone(),
                 cert,

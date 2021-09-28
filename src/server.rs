@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+use tokio::sync::RwLock;
 use tokio_rustls::{
     rustls::{
         internal::pemfile, Certificate, ClientCertVerified, ClientCertVerifier, ClientConfig,
@@ -103,12 +104,12 @@ impl ClientCertVerifier for AllowKnownAuthenticatedClient {
     ) -> Result<ClientCertVerified, TLSError> {
         let (cert, chain, trustroots) = prepare(&self.roots, presented_certs)?;
         let now = try_now()?;
-        dbg!(cert.verify_is_valid_tls_client_cert(
+        cert.verify_is_valid_tls_client_cert(
             SUPPORTED_SIG_ALGS,
             &webpki::TLSClientTrustAnchors(&trustroots),
             &chain,
             now,
-        ))
+        )
         .map_err(TLSError::WebPKIError)?;
 
         cert.verify_is_valid_for_at_least_one_dns_name(self.known.iter().map(|n| n.as_ref()))
@@ -120,15 +121,13 @@ impl ClientCertVerifier for AllowKnownAuthenticatedClient {
 
 pub struct Server {
     listen_port: u16,
-    peers: Arc<HashMap<String, PeerHandle>>,
+    peers: Arc<RwLock<HashMap<String, PeerHandle>>>,
 
     tls_acceptor: TlsAcceptor,
-
-    inbound_msg_rx: Option<mpsc::Receiver<NetworkMsg>>,
 }
 
 impl Server {
-    pub fn new(config: NetworkConfig) -> Self {
+    pub async fn setup(config: NetworkConfig) {
         let certs = {
             let mut rd = BufReader::new(config.cert.as_bytes());
             pemfile::certs(&mut rd).unwrap()
@@ -175,49 +174,60 @@ impl Server {
         };
 
         let (inbound_msg_tx, inbound_msg_rx) = mpsc::channel(64);
-        let mut peers = HashMap::new();
-        for c in config.peers {
-            let (peer, handle) = Peer::new(&c.domain, &c.host, c.port, inbound_msg_tx.clone());
-            let client_config = client_config.clone();
-            tokio::spawn(async move {
-                peer.run(client_config).await;
-            });
-            peers.insert(c.domain, handle);
-        }
-        Self {
+        let peers = {
+            let mut peers = HashMap::new();
+            for (id, c) in config.peers.into_iter().enumerate() {
+                let (peer, handle) = Peer::new(
+                    (id + 1) as u64,
+                    &c.domain,
+                    &c.host,
+                    c.port,
+                    inbound_msg_tx.clone(),
+                );
+                let client_config = client_config.clone();
+                tokio::spawn(async move {
+                    peer.run(client_config).await;
+                });
+                peers.insert(c.domain, handle);
+            }
+            Arc::new(RwLock::new(peers))
+        };
+
+        let dispatch_table = Arc::new(RwLock::new(HashMap::new()));
+        let dispatcher = NetworkMsgDispatcher {
+            dispatch_table: dispatch_table.clone(),
+            inbound_msg_rx,
+        };
+        tokio::spawn(async move {
+            dispatcher.run().await;
+        });
+
+        let network_svc = CitaCloudNetworkServiceServer {
+            dispatch_table,
+            peers: peers.clone(),
+        };
+        let grpc_addr = format!("0.0.0.0:{}", config.grpc_port).parse().unwrap();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(NetworkServiceServer::new(network_svc))
+                .serve(grpc_addr)
+                .await
+                .unwrap();
+        });
+
+        let this = Self {
             listen_port: config.listen_port,
-            peers: Arc::new(peers),
+            peers,
             tls_acceptor,
-            inbound_msg_rx: Some(inbound_msg_rx),
-        }
+        };
+
+        this.serve().await;
     }
 
-    pub async fn serve(mut self) {
+    async fn serve(self) {
         let listener = TcpListener::bind(("0.0.0.0", self.listen_port))
             .await
             .unwrap();
-
-        let peers = self.peers.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                let h = peers.values().next().unwrap();
-                h.send_msg(NetworkMsg {
-                    module: "network".into(),
-                    r#type: "test".into(),
-                    origin: 42,
-                    msg: vec![],
-                })
-                .await;
-            }
-        });
-
-        let mut inbound_msg_rx = self.inbound_msg_rx.take().unwrap();
-        tokio::spawn(async move {
-            while let Some(msg) = inbound_msg_rx.recv().await {
-                println!("recv {:?}", msg);
-            }
-        });
 
         loop {
             let (stream, _) = listener.accept().await.unwrap();
@@ -228,25 +238,135 @@ impl Server {
                 // TODO: consider those unwraps and logic
                 let stream = tls_acceptor.accept(stream).await.unwrap();
                 let certs = stream.get_ref().1.get_peer_certificates().unwrap();
-                let dns = {
+                let dns_s: Vec<String> = {
                     let cert = certs.first().unwrap();
                     let (_, parsed) = X509Certificate::from_der(cert.as_ref()).unwrap();
                     let (_, san) = parsed.tbs_certificate.subject_alternative_name().unwrap();
                     san.general_names
                         .iter()
-                        .find_map(|n| {
+                        .filter_map(|n| {
                             if let GeneralName::DNSName(dns) = *n {
                                 Some(dns.to_owned())
                             } else {
                                 None
                             }
                         })
-                        .unwrap()
+                        .collect()
                 };
-                if let Some(peer) = peers.get(&dns) {
+
+                let guard = peers.read().await;
+                if let Some(peer) = dns_s.into_iter().find_map(|dns| guard.get(&dns)) {
                     peer.accept(stream).await;
                 }
             });
+        }
+    }
+}
+
+use crate::proto::{
+    Empty, NetworkMsgHandlerServiceClient, NetworkService, NetworkServiceServer,
+    NetworkStatusResponse, RegisterInfo, SimpleResponse,
+};
+use tonic::transport::{Channel, Endpoint};
+use tonic::{Request, Response, Status};
+
+pub struct CitaCloudNetworkServiceServer {
+    dispatch_table: Arc<RwLock<HashMap<String, NetworkMsgHandlerServiceClient<Channel>>>>,
+    peers: Arc<RwLock<HashMap<String, PeerHandle>>>,
+}
+
+#[tonic::async_trait]
+impl NetworkService for CitaCloudNetworkServiceServer {
+    async fn send_msg(
+        &self,
+        request: Request<NetworkMsg>,
+    ) -> Result<Response<SimpleResponse>, Status> {
+        let mut msg = request.into_inner();
+        let origin = msg.origin;
+        msg.origin = 0;
+        let guard = self.peers.read().await;
+
+        if let Some(peer) = guard.values().find(|peer| peer.id() == origin) {
+            peer.send_msg(msg).await;
+        } else {
+            for peer in guard.values() {
+                peer.send_msg(msg.clone()).await;
+            }
+        }
+
+        let reply = SimpleResponse { is_success: true };
+        Ok(Response::new(reply))
+    }
+
+    async fn broadcast(
+        &self,
+        request: Request<NetworkMsg>,
+    ) -> Result<Response<SimpleResponse>, Status> {
+        let mut msg = request.into_inner();
+        msg.origin = 0;
+        let guard = self.peers.read().await;
+
+        for peer in guard.values() {
+            peer.send_msg(msg.clone()).await;
+        }
+
+        let reply = SimpleResponse { is_success: true };
+        Ok(Response::new(reply))
+    }
+
+    async fn get_network_status(
+        &self,
+        _request: Request<Empty>,
+    ) -> Result<Response<NetworkStatusResponse>, Status> {
+        let reply = NetworkStatusResponse {
+            peer_count: self.peers.read().await.len() as u64,
+        };
+
+        Ok(Response::new(reply))
+    }
+
+    async fn register_network_msg_handler(
+        &self,
+        request: Request<RegisterInfo>,
+    ) -> Result<Response<SimpleResponse>, Status> {
+        let info = request.into_inner();
+        let module_name = info.module_name;
+        let hostname = info.hostname;
+        let port = info.port;
+
+        let client = {
+            let uri = format!("http://{}:{}", hostname, port);
+            let channel = Endpoint::from_shared(uri)
+                .map_err(|e| Status::invalid_argument(format!("invalid host and port: {}", e)))?
+                .connect_lazy()
+                .unwrap();
+            NetworkMsgHandlerServiceClient::new(channel)
+        };
+
+        let mut dispatch_table = self.dispatch_table.write().await;
+        dispatch_table.insert(module_name, client);
+
+        let reply = SimpleResponse { is_success: true };
+        Ok(Response::new(reply))
+    }
+}
+
+pub struct NetworkMsgDispatcher {
+    inbound_msg_rx: mpsc::Receiver<NetworkMsg>,
+    dispatch_table: Arc<RwLock<HashMap<String, NetworkMsgHandlerServiceClient<Channel>>>>,
+}
+
+impl NetworkMsgDispatcher {
+    async fn run(mut self) {
+        while let Some(msg) = self.inbound_msg_rx.recv().await {
+            let client = {
+                let guard = self.dispatch_table.read().await;
+                guard.get(&msg.module).cloned()
+            };
+
+            if let Some(mut client) = client {
+                let _ = client.process_network_msg(msg).await;
+            }
         }
     }
 }

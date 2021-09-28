@@ -24,11 +24,16 @@ type Framed = tokio_util::codec::Framed<TlsStream, Codec>;
 
 #[derive(Debug, Clone)]
 pub struct PeerHandle {
+    id: u64,
     inbound_stream_tx: mpsc::Sender<ServerTlsStream>,
     outbound_msg_tx: mpsc::Sender<NetworkMsg>,
 }
 
 impl PeerHandle {
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
     pub async fn accept(&self, stream: ServerTlsStream) {
         self.inbound_stream_tx.send(stream).await.unwrap();
     }
@@ -39,6 +44,8 @@ impl PeerHandle {
 }
 
 pub struct Peer {
+    id: u64,
+
     domain: String,
     host: String,
     port: u16,
@@ -53,6 +60,7 @@ pub struct Peer {
 
 impl Peer {
     pub fn new(
+        id: u64,
         domain: &str,
         host: &str,
         port: u16,
@@ -62,6 +70,7 @@ impl Peer {
         let (outbound_msg_tx, outbound_msg_rx) = mpsc::channel(64);
 
         let peer = Self {
+            id,
             domain: domain.into(),
             host: host.into(),
             port,
@@ -70,6 +79,7 @@ impl Peer {
             inbound_msg_tx,
         };
         let handle = PeerHandle {
+            id,
             inbound_stream_tx,
             outbound_msg_tx,
         };
@@ -107,6 +117,7 @@ impl Peer {
                     pending_conn.take();
                     match result {
                         Ok(stream) => {
+                            println!("new stream connected; {}", self.domain);
                             framed.replace(Framed::new(
                                 tokio_rustls::TlsStream::Client(stream),
                                 Codec::new(64 * 1024 * 1024),
@@ -125,14 +136,15 @@ impl Peer {
                     }
                     // receive new stream
                     if framed.is_none() {
+                        println!("new stream received; {}", self.domain);
                         framed.replace(Framed::new(
                             tokio_rustls::TlsStream::Server(stream),
                             Codec::new(64 * 1024 * 1024),
                         ));
                     }
                 }
+                // send out msg
                 Some(msg) = self.outbound_msg_rx.recv() => {
-                    // send msg
                     if let Some(fd) = framed.as_mut() {
                         if let Err(e) = fd.send(msg).await {
                             println!("send outbound msg failed: {}", e);
@@ -144,7 +156,8 @@ impl Peer {
                     }
                 }
                 Some(result) = async { framed.as_mut().unwrap().next().await }, if framed.is_some() => match result {
-                    Ok(msg) => {
+                    Ok(mut msg) => {
+                        msg.origin = self.id;
                         self.inbound_msg_tx.send(msg).await.unwrap();
                     }
                     Err(_) => {
