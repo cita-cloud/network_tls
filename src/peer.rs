@@ -107,6 +107,7 @@ impl Peer {
         loop {
             tokio::select! {
                 _ = reconnect_timeout_fut.as_mut(), if framed.is_none() && pending_conn.is_none() => {
+                    info!(peer = %self.domain, "connecting..");
                     // try to connect
                     let host = self.host.clone();
                     let port = self.port;
@@ -181,14 +182,18 @@ impl Peer {
                             let _ = self.inbound_msg_tx.send(msg).await;
                         }
                         Err(e) => {
-                            println!("framed stream report error: {}", e);
+                            warn!(
+                                peer = %self.domain,
+                                reason = %e,
+                                "framed stream report error, will drop this stream"
+                            );
                             framed.take();
                             reconnect_timeout_fut.as_mut().reset(time::Instant::now() + reconnect_timeout);
                         }
                     }
                 }
                 else => {
-                    println!("Server stoped.");
+                    info!("Peer `{}` stoped.", self.domain);
                 }
             }
         }
