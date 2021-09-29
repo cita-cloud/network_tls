@@ -1,21 +1,26 @@
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time;
+
+use tokio_stream::Stream;
 use tokio_stream::StreamExt;
 
 use tokio_rustls::rustls::ClientConfig;
 use tokio_rustls::webpki::DNSNameRef;
 use tokio_rustls::TlsConnector;
 
+use futures::future::poll_fn;
 use futures::SinkExt;
 
 use tracing::{info, warn};
 
 use crate::codec::Codec;
+use crate::codec::DecodeError;
 use crate::proto::NetworkMsg;
 
 type TlsStream = tokio_rustls::TlsStream<TcpStream>;
@@ -106,9 +111,10 @@ impl Peer {
 
         loop {
             tokio::select! {
+                // spawn task to connect to this peer; outbound stream
                 _ = reconnect_timeout_fut.as_mut(), if framed.is_none() && pending_conn.is_none() => {
                     info!(peer = %self.domain, "connecting..");
-                    // try to connect
+
                     let host = self.host.clone();
                     let port = self.port;
 
@@ -124,6 +130,7 @@ impl Peer {
 
                     pending_conn.replace(handle);
                 }
+                // handle previous connection task result
                 Ok(conn_result) = async { pending_conn.as_mut().unwrap().await }, if pending_conn.is_some() => {
                     pending_conn.take();
 
@@ -144,6 +151,7 @@ impl Peer {
                         }
                     }
                 }
+                // accept the established conn from this peer; inbound stream
                 Some(stream) = self.inbound_stream_rx.recv() => {
                     if let Some(h) = pending_conn.take() {
                         h.abort();
@@ -161,36 +169,101 @@ impl Peer {
                         ));
                     }
                 }
-                // send out msg
+                // send out msgs to this peer
                 Some(msg) = self.outbound_msg_rx.recv() => {
+                    let mut msgs = vec![msg];
+                    poll_fn(|cx| {
+                        while let Poll::Ready(Some(msg)) = self.outbound_msg_rx.poll_recv(cx) {
+                            msgs.push(msg);
+                        }
+                        Poll::Ready(())
+                    }).await;
+
                     if let Some(fd) = framed.as_mut() {
-                        if let Err(e) = fd.send(msg).await {
+                        let mut last_result = Ok(());
+                        for msg in msgs {
+                            last_result = fd.feed(msg).await;
+                            if last_result.is_err() {
+                                break;
+                            }
+                        }
+
+                        if last_result.is_ok() {
+                            last_result = fd.flush().await;
+                        }
+                        if let Err(e) = last_result {
                             warn!(
                                 peer = %self.domain,
                                 reason = %e,
-                                "send out msg failed, drop connection"
+                                "send outbound msgs failed, drop the stream"
                             );
                             framed.take();
                             reconnect_timeout_fut.as_mut().reset(time::Instant::now() + reconnect_timeout);
                         }
+                    } else {
+                        warn!(
+                            peer = %self.domain,
+                            msgs_cnt = %msgs.len(),
+                            "drop oubound msgs since no available stream to this peer"
+                        );
                     }
                 }
-                Some(result) = async { framed.as_mut().unwrap().next().await }, if framed.is_some() => {
-                    match result {
-                        Ok(mut msg) => {
-                            msg.origin = self.id;
-                            let _ = self.inbound_msg_tx.send(msg).await;
+                // receive msgs from this peer
+                opt_res = async { framed.as_mut().unwrap().next().await }, if framed.is_some() => {
+                    // handle the stream; return true if the stream should be drop
+                    let f = |opt_res: Option<Result<NetworkMsg, DecodeError>>| {
+                        match opt_res {
+                            Some(Ok(mut msg)) => {
+                                msg.origin = self.id;
+
+                                let inbound_msg_tx = self.inbound_msg_tx.clone();
+                                tokio::spawn(async move {
+                                    let _ = inbound_msg_tx.send(msg).await;
+                                });
+                                false
+                            }
+                            Some(Err(e)) => {
+                                warn!(
+                                    peer = %self.domain,
+                                    reason = %e,
+                                    "framed stream report error"
+                                );
+                                false
+                            }
+                            None => {
+                                warn!(
+                                    peer = %self.domain,
+                                    "framed stream end, will drop it"
+                                );
+                                true
+                            }
                         }
-                        Err(e) => {
-                            warn!(
-                                peer = %self.domain,
-                                reason = %e,
-                                "framed stream report error, will drop this stream"
-                            );
-                            framed.take();
-                            reconnect_timeout_fut.as_mut().reset(time::Instant::now() + reconnect_timeout);
-                        }
+                    };
+
+                    let mut wants_drop = f(opt_res);
+                    if !wants_drop {
+                        poll_fn(|cx| {
+                            loop {
+                                let framed_stream = Pin::new(framed.as_mut().unwrap());
+                                match framed_stream.poll_next(cx) {
+                                    Poll::Ready(opt_res) => {
+                                        wants_drop = f(opt_res);
+                                        if wants_drop {
+                                            break;
+                                        }
+                                    }
+                                    Poll::Pending => break,
+                                }
+                            }
+                            Poll::Ready(())
+                        }).await;
                     }
+
+                    if wants_drop {
+                        framed.take();
+                        reconnect_timeout_fut.as_mut().reset(time::Instant::now() + reconnect_timeout);
+                    }
+
                 }
                 else => {
                     info!("Peer `{}` stoped.", self.domain);
