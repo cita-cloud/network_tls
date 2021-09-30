@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::BufReader;
 use std::sync::Arc;
 
-use tracing::info;
+use tracing::{info, warn};
 
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -175,7 +175,7 @@ impl Server {
             TlsAcceptor::from(Arc::new(server_config))
         };
 
-        let (inbound_msg_tx, inbound_msg_rx) = mpsc::channel(64);
+        let (inbound_msg_tx, inbound_msg_rx) = mpsc::channel(1024);
         let peers = {
             let mut peers = HashMap::new();
             for (id, c) in config.peers.into_iter().enumerate() {
@@ -241,7 +241,13 @@ impl Server {
             let peers = self.peers.clone();
             tokio::spawn(async move {
                 // TODO: consider those unwraps and logic
-                let stream = tls_acceptor.accept(stream).await.unwrap();
+                let stream = match tls_acceptor.accept(stream).await {
+                    Ok(stream) => stream,
+                    Err(e) => {
+                        warn!("tls report error: {}", e);
+                        return;
+                    }
+                };
                 let certs = stream.get_ref().1.get_peer_certificates().unwrap();
                 let dns_s: Vec<String> = {
                     let cert = certs.first().unwrap();

@@ -79,7 +79,7 @@ impl Peer {
         inbound_msg_tx: mpsc::Sender<NetworkMsg>,
     ) -> (Peer, PeerHandle) {
         let (inbound_stream_tx, inbound_stream_rx) = mpsc::channel(1);
-        let (outbound_msg_tx, outbound_msg_rx) = mpsc::channel(64);
+        let (outbound_msg_tx, outbound_msg_rx) = mpsc::channel(1024);
 
         let peer = Self {
             id,
@@ -263,7 +263,6 @@ impl Peer {
                         framed.take();
                         reconnect_timeout_fut.as_mut().reset(time::Instant::now() + reconnect_timeout);
                     }
-
                 }
                 else => {
                     info!("Peer `{}` stoped.", self.domain);
