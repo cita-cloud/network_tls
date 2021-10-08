@@ -130,7 +130,7 @@ impl Peer {
 
                     pending_conn.replace(handle);
                 }
-                // handle previous connection task result
+                // handle previous connection task's result
                 Ok(conn_result) = async { pending_conn.as_mut().unwrap().await }, if pending_conn.is_some() => {
                     pending_conn.take();
 
@@ -169,8 +169,9 @@ impl Peer {
                         ));
                     }
                 }
-                // send out msgs to this peer
+                // send out msgs to this peer; outbound msgs
                 Some(msg) = self.outbound_msg_rx.recv() => {
+                    // drain all the available outbound msgs
                     let mut msgs = vec![msg];
                     poll_fn(|cx| {
                         while let Poll::Ready(Some(msg)) = self.outbound_msg_rx.poll_recv(cx) {
@@ -204,13 +205,13 @@ impl Peer {
                         warn!(
                             peer = %self.domain,
                             msgs_cnt = %msgs.len(),
-                            "drop oubound msgs since no available stream to this peer"
+                            "drop outbound msgs since no available stream to this peer"
                         );
                     }
                 }
-                // receive msgs from this peer
+                // receive msgs from this peer; inbound msgs
                 opt_res = async { framed.as_mut().unwrap().next().await }, if framed.is_some() => {
-                    // handle the stream; return true if the stream should be drop
+                    // handle items produced by the stream; return true if the stream should be dropped
                     let f = |opt_res: Option<Result<NetworkMsg, DecodeError>>| {
                         match opt_res {
                             Some(Ok(mut msg)) => {
@@ -240,6 +241,7 @@ impl Peer {
                         }
                     };
 
+                    // drain all the available inbound msgs
                     let mut wants_drop = f(opt_res);
                     if !wants_drop {
                         poll_fn(|cx| {

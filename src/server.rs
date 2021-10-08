@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::BufReader;
 use std::sync::Arc;
 
-use tracing::{info, warn};
+use tracing::{info, warn, error};
 
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -23,6 +23,8 @@ use x509_parser::traits::FromDer;
 use crate::{config::NetworkConfig, peer::Peer, peer::PeerHandle, proto::NetworkMsg};
 
 type SignatureAlgorithms = &'static [&'static webpki::SignatureAlgorithm];
+
+// The `ClientCertVerifier` impl is from [rustls](https://docs.rs/rustls/0.20.0/src/rustls/verify.rs.html)
 
 /// Which signature verification mechanisms we support.  No particular
 /// order.
@@ -78,12 +80,12 @@ fn prepare<'a, 'b>(
     Ok((cert, chain, trustroots))
 }
 
-struct AllowKnownAuthenticatedClient {
+struct AllowKnownClientOnly {
     roots: RootCertStore,
     known: Vec<DNSName>,
 }
 
-impl ClientCertVerifier for AllowKnownAuthenticatedClient {
+impl ClientCertVerifier for AllowKnownClientOnly {
     fn offer_client_auth(&self) -> bool {
         true
     }
@@ -167,7 +169,7 @@ impl Server {
                     })
                     .collect();
 
-                let verifier = AllowKnownAuthenticatedClient { roots, known };
+                let verifier = AllowKnownClientOnly { roots, known };
                 ServerConfig::new(Arc::new(verifier))
             };
             server_config.set_single_cert(certs, priv_key).unwrap();
@@ -235,7 +237,13 @@ impl Server {
         info!("listen on `{}:{}`", addr.0, addr.1);
 
         loop {
-            let (stream, _) = listener.accept().await.unwrap();
+            let (stream, _) = match listener.accept().await {
+                Ok(stream) => stream,
+                Err(e) => {
+                    warn!("accept tcp stream error: {}", e);
+                    continue;
+                }
+            };
 
             let tls_acceptor = self.tls_acceptor.clone();
             let peers = self.peers.clone();
@@ -266,8 +274,14 @@ impl Server {
                 };
 
                 let guard = peers.read().await;
-                if let Some(peer) = dns_s.into_iter().find_map(|dns| guard.get(&dns)) {
+                if let Some(peer) = dns_s.iter().find_map(|dns| guard.get(dns)) {
                     peer.accept(stream).await;
+                } else {
+                    error!(
+                        peers = ?&*guard,
+                        cert.dns = ?dns_s,
+                        "no peer instance for this connection"
+                    );
                 }
             });
         }
@@ -293,6 +307,7 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         request: Request<NetworkMsg>,
     ) -> Result<Response<SimpleResponse>, Status> {
         let mut msg = request.into_inner();
+        // This origin only used in local context, and shouldn't leak outside.
         let origin = msg.origin;
         msg.origin = 0;
         let guard = self.peers.read().await;
@@ -300,6 +315,8 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         if let Some(peer) = guard.values().find(|peer| peer.id() == origin) {
             peer.send_msg(msg).await;
         } else {
+            // TODO: check if it's necessary
+            // fallback to broadcast
             for peer in guard.values() {
                 peer.send_msg(msg.clone()).await;
             }
@@ -314,6 +331,7 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         request: Request<NetworkMsg>,
     ) -> Result<Response<SimpleResponse>, Status> {
         let mut msg = request.into_inner();
+        // This origin only used in local context, and shouldn't leak outside.
         msg.origin = 0;
         let guard = self.peers.read().await;
 
@@ -376,7 +394,22 @@ impl NetworkMsgDispatcher {
             };
 
             if let Some(mut client) = client {
-                let _ = client.process_network_msg(msg).await;
+                let msg_module = msg.module.clone();
+                let msg_origin = msg.origin;
+                if let Err(e) = client.process_network_msg(msg).await {
+                    warn!(
+                        msg.module = %msg_module,
+                        msg.origin = %msg_origin,
+                        error = %e,
+                        "registered client processes network msg failed"
+                    );
+                }
+            } else {
+                warn!(
+                    %msg.module,
+                    %msg.origin,
+                    "unregistered module, will drop msg"
+                );
             }
         }
     }
