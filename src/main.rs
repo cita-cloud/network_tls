@@ -23,23 +23,29 @@ fn main() {
                 .about("the network config")
                 .takes_value(true)
                 .validator(|s| s.parse::<PathBuf>())
-                .default_value("config.toml")
+                .default_value("config.toml"),
+        )
+        .arg(
+            Arg::new("stdout")
+                .about("if specified, log to stdout")
+                .long("stdout")
+                .conflicts_with_all(&["log-dir", "log-file-name"]),
         )
         .arg(
             Arg::new("log-dir")
-                .about("the log dir; log to stdout if neither `log-dir` or `log-file-name` are specified")
+                .about("the log dir")
                 .short('d')
                 .long("log-dir")
                 .takes_value(true)
-                .validator(|s| s.parse::<PathBuf>())
+                .validator(|s| s.parse::<PathBuf>()),
         )
         .arg(
             Arg::new("log-file-name")
-                .about("the log file name; log to stdout if neither `log-dir` or `log-file-name` are specified")
+                .about("the log file name")
                 .short('f')
                 .long("log-file-name")
                 .takes_value(true)
-                .validator(|s| s.parse::<PathBuf>())
+                .validator(|s| s.parse::<PathBuf>()),
         );
 
     let gen_config_cmd = App::new("gen-config")
@@ -57,7 +63,6 @@ fn main() {
         .subcommands([run_cmd, gen_config_cmd]);
 
     let matches = app.get_matches();
-
     match matches.subcommand() {
         Some(("run", m)) => {
             let config = {
@@ -67,13 +72,13 @@ fn main() {
 
             let log_dir = m.value_of("log-dir");
             let log_file_name = m.value_of("log-file-name");
-            let (writer, _guard) = if log_dir.or(log_file_name).is_some() {
+            let (writer, _guard) = if m.is_present("stdout") {
+                tracing_appender::non_blocking(std::io::stdout())
+            } else {
                 let log_dir = log_dir.unwrap_or("logs");
                 let log_file_name = log_file_name.unwrap_or("network-service.log");
                 let file_appender = tracing_appender::rolling::daily(log_dir, log_file_name);
                 tracing_appender::non_blocking(file_appender)
-            } else {
-                tracing_appender::non_blocking(std::io::stdout())
             };
 
             tracing_subscriber::fmt()
