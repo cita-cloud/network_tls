@@ -32,8 +32,7 @@ pub struct NetworkConfig {
     pub listen_port: u16,
 
     #[serde(default = "default_reconnect_timeout")]
-    // in seconds
-    pub reconnect_timeout: u64,
+    pub reconnect_timeout: u64, // in seconds
 
     pub ca_cert: String,
 
@@ -80,7 +79,10 @@ fn cert(domain: &str, signer: &Certificate) -> (Certificate, String, String) {
 }
 
 pub fn generate_config(peer_count: usize) {
-    let (ca_cert, ca_cert_pem, _) = ca_cert();
+    let (ca_cert, ca_cert_pem, ca_key_pem) = ca_cert();
+
+    let mut f = File::create("ca_key.pem").unwrap();
+    f.write_all(ca_key_pem.as_bytes()).unwrap();
 
     let peers: Vec<PeerConfig> = (0..peer_count)
         .map(|i| {
