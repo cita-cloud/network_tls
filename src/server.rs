@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::io::BufReader;
+use std::net::IpAddr;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -16,11 +18,25 @@ use tokio_rustls::{
     TlsAcceptor,
 };
 
+use tonic::transport::{Channel, Endpoint};
+use tonic::{Request, Response};
+
 use x509_parser::extensions::GeneralName;
 use x509_parser::prelude::X509Certificate;
 use x509_parser::traits::FromDer;
 
-use crate::{config::NetworkConfig, peer::Peer, peer::PeerHandle, proto::NetworkMsg};
+use tentacle_multiaddr::MultiAddr;
+use tentacle_multiaddr::Protocol;
+
+use crate::{
+    config::NetworkConfig,
+    peer::Peer,
+    peer::PeerHandle,
+    proto::{
+        Empty, NetworkMsg, NetworkMsgHandlerServiceClient, NetworkService, NetworkServiceServer,
+        NetworkStatusResponse, NodeNetInfo, RegisterInfo, StatusCode, TotalNodeNetInfo,
+    },
+};
 
 type SignatureAlgorithms = &'static [&'static webpki::SignatureAlgorithm];
 
@@ -184,8 +200,8 @@ impl Server {
                 let (peer, handle) = Peer::new(
                     // start from 1
                     (id + 1) as u64,
-                    &c.domain,
-                    &c.host,
+                    c.domain.clone(),
+                    c.host,
                     c.port,
                     client_config.clone(),
                     config.reconnect_timeout,
@@ -211,6 +227,9 @@ impl Server {
         let network_svc = CitaCloudNetworkServiceServer {
             dispatch_table,
             peers: peers.clone(),
+            tls_config: client_config,
+            inbound_msg_tx,
+            reconnect_timeout: config.reconnect_timeout,
         };
         let grpc_addr = format!("0.0.0.0:{}", config.grpc_port).parse().unwrap();
         tokio::spawn(async move {
@@ -288,16 +307,14 @@ impl Server {
     }
 }
 
-use crate::proto::{
-    Empty, NetworkMsgHandlerServiceClient, NetworkService, NetworkServiceServer,
-    NetworkStatusResponse, RegisterInfo, SimpleResponse,
-};
-use tonic::transport::{Channel, Endpoint};
-use tonic::{Request, Response, Status};
-
 pub struct CitaCloudNetworkServiceServer {
     dispatch_table: Arc<RwLock<HashMap<String, NetworkMsgHandlerServiceClient<Channel>>>>,
     peers: Arc<RwLock<HashMap<String, PeerHandle>>>,
+
+    // for adding new node
+    tls_config: Arc<ClientConfig>,
+    inbound_msg_tx: mpsc::Sender<NetworkMsg>,
+    reconnect_timeout: u64,
 }
 
 #[tonic::async_trait]
@@ -305,7 +322,7 @@ impl NetworkService for CitaCloudNetworkServiceServer {
     async fn send_msg(
         &self,
         request: Request<NetworkMsg>,
-    ) -> Result<Response<SimpleResponse>, Status> {
+    ) -> Result<Response<StatusCode>, tonic::Status> {
         let mut msg = request.into_inner();
         // This origin only used in local context, and shouldn't leak outside.
         let origin = msg.origin;
@@ -322,14 +339,14 @@ impl NetworkService for CitaCloudNetworkServiceServer {
             }
         }
 
-        let reply = SimpleResponse { is_success: true };
-        Ok(Response::new(reply))
+        let ok = StatusCode { code: 0 };
+        Ok(Response::new(ok))
     }
 
     async fn broadcast(
         &self,
         request: Request<NetworkMsg>,
-    ) -> Result<Response<SimpleResponse>, Status> {
+    ) -> Result<Response<StatusCode>, tonic::Status> {
         let mut msg = request.into_inner();
         // This origin only used in local context, and shouldn't leak outside.
         msg.origin = 0;
@@ -339,14 +356,14 @@ impl NetworkService for CitaCloudNetworkServiceServer {
             peer.send_msg(msg.clone()).await;
         }
 
-        let reply = SimpleResponse { is_success: true };
-        Ok(Response::new(reply))
+        let ok = StatusCode { code: 0 };
+        Ok(Response::new(ok))
     }
 
     async fn get_network_status(
         &self,
         _request: Request<Empty>,
-    ) -> Result<Response<NetworkStatusResponse>, Status> {
+    ) -> Result<Response<NetworkStatusResponse>, tonic::Status> {
         let reply = NetworkStatusResponse {
             peer_count: self.peers.read().await.len() as u64,
         };
@@ -357,7 +374,7 @@ impl NetworkService for CitaCloudNetworkServiceServer {
     async fn register_network_msg_handler(
         &self,
         request: Request<RegisterInfo>,
-    ) -> Result<Response<SimpleResponse>, Status> {
+    ) -> Result<Response<StatusCode>, tonic::Status> {
         let info = request.into_inner();
         let module_name = info.module_name;
         let hostname = info.hostname;
@@ -366,7 +383,9 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         let client = {
             let uri = format!("http://{}:{}", hostname, port);
             let channel = Endpoint::from_shared(uri)
-                .map_err(|e| Status::invalid_argument(format!("invalid host and port: {}", e)))?
+                .map_err(|e| {
+                    tonic::Status::invalid_argument(format!("invalid host and port: {}", e))
+                })?
                 .connect_lazy()
                 .unwrap();
             NetworkMsgHandlerServiceClient::new(channel)
@@ -375,8 +394,66 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         let mut dispatch_table = self.dispatch_table.write().await;
         dispatch_table.insert(module_name, client);
 
-        let reply = SimpleResponse { is_success: true };
-        Ok(Response::new(reply))
+        let ok = StatusCode { code: 0 };
+        Ok(Response::new(ok))
+    }
+
+    async fn add_node(
+        &self,
+        request: Request<NodeNetInfo>,
+    ) -> Result<Response<StatusCode>, tonic::Status> {
+        let (ip, port, domain) = parse_multiaddr(&request.into_inner().multi_address)?;
+
+        let mut peers = self.peers.write().await;
+        if peers.contains_key(&domain) {
+            return Err(tonic::Status::invalid_argument("peer is already in config"));
+        }
+
+        let (peer, handle) = Peer::new(
+            peers.len() as u64 + 1,
+            domain.clone(),
+            ip.to_string(),
+            port,
+            self.tls_config.clone(),
+            self.reconnect_timeout,
+            self.inbound_msg_tx.clone(),
+        );
+
+        tokio::spawn(async move {
+            peer.run().await;
+        });
+        peers.insert(domain, handle);
+
+        let ok = StatusCode { code: 0 };
+        Ok(Response::new(ok))
+    }
+
+    async fn get_peers_net_info(
+        &self,
+        _request: Request<Empty>,
+    ) -> Result<Response<TotalNodeNetInfo>, tonic::Status> {
+        let mut node_infos: Vec<NodeNetInfo> = vec![];
+        let peers = self.peers.read().await;
+        for (domain, p) in peers.iter() {
+            let multiaddr = match build_multiaddr(p.host(), p.port(), domain) {
+                Some(multiaddr) => multiaddr,
+                None => {
+                    warn!(
+                        peer.domain = %domain,
+                        peer.host = p.host(),
+                        peer.port = p.port(),
+                        "get peers net info encounter a unresolved socket addr"
+                    );
+                    continue;
+                }
+            };
+            node_infos.push(NodeNetInfo {
+                multi_address: multiaddr.to_string(),
+                origin: p.id(),
+            });
+        }
+
+        Ok(Response::new(TotalNodeNetInfo { nodes: node_infos }))
     }
 }
 
@@ -412,5 +489,86 @@ impl NetworkMsgDispatcher {
                 );
             }
         }
+    }
+}
+
+fn parse_multiaddr(s: &str) -> Result<(IpAddr, u16, String), tonic::Status> {
+    let multiaddr = s
+        .parse::<MultiAddr>()
+        .map_err(|e| tonic::Status::invalid_argument(format!("parse multiaddr failed: `{}`", e)))?;
+
+    let mut ip: Option<IpAddr> = None;
+    let mut port: Option<u16> = None;
+    let mut domain: Option<String> = None;
+    for ptcl in multiaddr.iter() {
+        match ptcl {
+            Protocol::Ip4(ipv4) => {
+                ip.replace(IpAddr::V4(ipv4));
+            }
+            Protocol::Ip6(ipv6) => {
+                ip.replace(IpAddr::V6(ipv6));
+            }
+            Protocol::Tcp(p) => {
+                port.replace(p);
+            }
+            Protocol::Tls(d) => {
+                domain.replace(d.into());
+            }
+            _ => (),
+        }
+    }
+
+    let ip = ip.ok_or_else(|| tonic::Status::invalid_argument("ip not present in multiaddr"))?;
+    let port =
+        port.ok_or_else(|| tonic::Status::invalid_argument("port not present in multiaddr"))?;
+    let domain =
+        domain.ok_or_else(|| tonic::Status::invalid_argument("domain not present in multiaddr"))?;
+
+    Ok((ip, port, domain))
+}
+
+fn build_multiaddr(host: &str, port: u16, domain: &str) -> Option<String> {
+    use std::net::ToSocketAddrs;
+
+    match (host, port)
+        .to_socket_addrs()
+        .into_iter()
+        .flatten()
+        .next()?
+    {
+        SocketAddr::V4(socket_v4) => {
+            vec![
+                Protocol::Ip4(socket_v4.ip().to_owned()),
+                Protocol::Tcp(socket_v4.port()),
+                Protocol::Tls(domain.into()),
+            ]
+        }
+        SocketAddr::V6(socket_v6) => {
+            vec![
+                Protocol::Ip6(socket_v6.ip().to_owned()),
+                Protocol::Tcp(socket_v6.port()),
+                Protocol::Tls(domain.into()),
+            ]
+        }
+    }
+    .into_iter()
+    .collect::<MultiAddr>()
+    .to_string()
+    .into()
+}
+
+#[cfg(test)]
+mod test {
+    use super::build_multiaddr;
+    use super::parse_multiaddr;
+
+    #[test]
+    fn test_build_multiaddr() {
+        assert!(build_multiaddr("localhost", 80, "fy").is_some());
+    }
+
+    #[test]
+    fn test_parse_multiaddr() {
+        assert!(parse_multiaddr("/ip4/127.0.0.1/tcp/5678/tls/fy").is_ok());
     }
 }

@@ -32,6 +32,8 @@ type Framed = tokio_util::codec::Framed<TlsStream, Codec>;
 #[derive(Debug, Clone)]
 pub struct PeerHandle {
     id: u64,
+    host: String,
+    port: u16,
     inbound_stream_tx: mpsc::Sender<ServerTlsStream>,
     outbound_msg_tx: mpsc::Sender<NetworkMsg>,
 }
@@ -39,6 +41,14 @@ pub struct PeerHandle {
 impl PeerHandle {
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
     }
 
     pub async fn accept(&self, stream: ServerTlsStream) {
@@ -53,9 +63,9 @@ impl PeerHandle {
 pub struct Peer {
     id: u64,
 
-    domain: String,
     host: String,
     port: u16,
+    domain: String,
 
     tls_config: Arc<ClientConfig>,
     reconnect_timeout: u64,
@@ -71,8 +81,8 @@ pub struct Peer {
 impl Peer {
     pub fn new(
         id: u64,
-        domain: &str,
-        host: &str,
+        domain: String,
+        host: String,
         port: u16,
         tls_config: Arc<ClientConfig>,
         reconnect_timeout: u64,
@@ -83,8 +93,8 @@ impl Peer {
 
         let peer = Self {
             id,
-            domain: domain.into(),
-            host: host.into(),
+            domain,
+            host: host.clone(),
             port,
             tls_config,
             reconnect_timeout,
@@ -92,8 +102,11 @@ impl Peer {
             inbound_msg_tx,
             inbound_stream_rx,
         };
+
         let handle = PeerHandle {
             id,
+            host,
+            port,
             inbound_stream_tx,
             outbound_msg_tx,
         };
