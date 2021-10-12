@@ -63,9 +63,9 @@ impl PeerHandle {
 pub struct Peer {
     id: u64,
 
+    domain: String,
     host: String,
     port: u16,
-    domain: String,
 
     tls_config: Arc<ClientConfig>,
     reconnect_timeout: u64,
