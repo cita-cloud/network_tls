@@ -396,14 +396,16 @@ impl NetworkMsgDispatcher {
             if let Some(mut client) = client {
                 let msg_module = msg.module.clone();
                 let msg_origin = msg.origin;
-                if let Err(e) = client.process_network_msg(msg).await {
-                    warn!(
-                        msg.module = %msg_module,
-                        msg.origin = %msg_origin,
-                        error = %e,
-                        "registered client processes network msg failed"
-                    );
-                }
+                tokio::spawn(async move {
+                    if let Err(e) = client.process_network_msg(msg).await {
+                        warn!(
+                            msg.module = %msg_module,
+                            msg.origin = %msg_origin,
+                            error = %e,
+                            "registered client processes network msg failed"
+                        );
+                    }
+                });
             } else {
                 warn!(
                     %msg.module,
