@@ -43,12 +43,12 @@ impl Decoder for Codec {
         let content_len = u32::from_be_bytes(src[..4].try_into().unwrap()) as usize;
         let frame_len = header_len + content_len;
 
-        if frame_len > MAX_FRAME_LEN as usize {
+        if content_len > MAX_FRAME_LEN as usize {
             return Err(DecodeError::InvalidLength(frame_len));
         }
 
         if src.len() < frame_len {
-            src.reserve(frame_len);
+            src.reserve(frame_len - src.len());
             return Ok(None);
         }
 
@@ -65,8 +65,8 @@ impl Encoder<NetworkMsg> for Codec {
         let encoded_len = item.encoded_len();
         let frame_len = encoded_len + std::mem::size_of::<u32>();
 
-        if frame_len > MAX_FRAME_LEN as usize {
-            return Err(EncodeError::FrameLimitExceed(frame_len));
+        if encoded_len > MAX_FRAME_LEN as usize {
+            return Err(EncodeError::FrameLimitExceed(encoded_len));
         }
 
         dst.reserve(frame_len);
