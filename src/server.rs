@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::BufReader;
 use std::sync::Arc;
 
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;

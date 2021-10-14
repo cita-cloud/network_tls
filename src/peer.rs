@@ -223,11 +223,20 @@ impl Peer {
                                 });
                                 false
                             }
+                            Some(Err(DecodeError::Io(e))) => {
+                                // drop the stream
+                                warn!(
+                                    peer = %self.domain,
+                                    reason = %e,
+                                    "framed stream report io error, will drop the stream"
+                                );
+                                true
+                            }
                             Some(Err(e)) => {
                                 warn!(
                                     peer = %self.domain,
                                     reason = %e,
-                                    "framed stream report error"
+                                    "framed stream report decode error"
                                 );
                                 false
                             }
