@@ -11,13 +11,22 @@ use clap::Arg;
 
 use tracing::Level;
 
-use crate::config::load_config;
+use crate::config::NetworkConfig;
 use crate::server::Server;
 
 fn main() {
     let run_cmd = App::new("run")
         .alias("r")
         .about("run network service")
+        .arg(
+            Arg::new("port")
+                .about("the server grpc port")
+                .short('p')
+                .long("port")
+                .takes_value(true)
+                .validator(|s| s.parse::<u16>())
+                .default_value("50000"),
+        )
         .arg(
             Arg::new("config")
                 .about("the network config")
@@ -53,9 +62,28 @@ fn main() {
         .about("generate TEST-ONLY network config")
         .arg(
             Arg::new("peer-count")
+                .about("set peer number to generate")
+                .short('p')
+                .long("peer-count")
                 .takes_value(true)
                 .validator(|s| s.parse::<usize>())
-                .default_value("2"),
+                .default_value("4"),
+        )
+        .arg(
+            Arg::new("config-dir")
+                .about("set config directory")
+                .short('d')
+                .long("config-dir")
+                .takes_value(true)
+                .validator(|s| s.parse::<PathBuf>()),
+        )
+        .arg(
+            Arg::new("chain-name")
+                .about("set chain name")
+                .short('c')
+                .long("chain-name")
+                .takes_value(true)
+                .validator(|s| s.parse::<PathBuf>()),
         );
 
     let app = App::new("network")
@@ -65,10 +93,15 @@ fn main() {
     let matches = app.get_matches();
     match matches.subcommand() {
         Some(("run", m)) => {
-            let config = {
+            let mut config = {
                 let path = m.value_of("config").unwrap();
-                load_config(path)
+                NetworkConfig::new(path)
             };
+
+            let cli_port = m.value_of("port").unwrap().parse::<u16>().unwrap();
+            if 50000 != cli_port {
+                config.grpc_port = cli_port
+            }
 
             let log_dir = m.value_of("log-dir");
             let log_file_name = m.value_of("log-file-name");
@@ -92,7 +125,11 @@ fn main() {
         }
         Some(("gen-config", m)) => {
             let peer_count = m.value_of("peer-count").unwrap().parse::<usize>().unwrap();
-            config::generate_config(peer_count);
+            let config_dir = m.value_of("config-dir");
+            let config_dir = config_dir.unwrap_or("tmp");
+            let chain_name = m.value_of("chain-name");
+            let chain_name = chain_name.unwrap_or("test-chain");
+            config::generate_config(peer_count, config_dir, chain_name);
             println!("Done.\nWARNING: This config is for TEST-ONLY.");
         }
         _ => {

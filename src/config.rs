@@ -11,7 +11,9 @@ use rcgen::PKCS_ECDSA_P256_SHA256;
 
 use toml::Value;
 
+use cloud_util::common::read_toml;
 use serde::{Deserialize, Serialize};
+use std::fs;
 
 fn default_reconnect_timeout() -> u64 {
     5
@@ -53,6 +55,7 @@ struct Config {
 }
 
 fn ca_cert() -> (Certificate, String, String) {
+    // todo params build
     let mut params = CertificateParams::new(vec![]);
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
 
@@ -78,7 +81,7 @@ fn cert(domain: &str, signer: &Certificate) -> (Certificate, String, String) {
     (cert, cert_pem, key_pem)
 }
 
-pub fn generate_config(peer_count: usize) {
+pub fn generate_config(peer_count: usize, config_dir: &str, chain_name: &str) {
     let (ca_cert, ca_cert_pem, ca_key_pem) = ca_cert();
 
     let mut f = File::create("ca_key.pem").unwrap();
@@ -87,7 +90,7 @@ pub fn generate_config(peer_count: usize) {
     let peers: Vec<PeerConfig> = (0..peer_count)
         .map(|i| {
             let domain = format!("peer{}.fy", i);
-            let port = (30000 + i * 1000) as u16;
+            let port = (40000 + i) as u16;
             PeerConfig {
                 host: "localhost".into(),
                 port,
@@ -102,34 +105,39 @@ pub fn generate_config(peer_count: usize) {
         let this = peers.remove(i as usize);
 
         let (_, cert, priv_key) = cert(&p.domain, &ca_cert);
-        let config = {
-            let network = NetworkConfig {
-                grpc_port: (50000 + i * 1000) as u16,
-                listen_port: this.port,
-                reconnect_timeout: default_reconnect_timeout(),
-                ca_cert: ca_cert_pem.clone(),
-                cert,
-                priv_key,
-                peers,
-            };
-            Config { network }
+        let network_config = NetworkConfig {
+            grpc_port: (50000 + i * 1000) as u16,
+            listen_port: this.port,
+            reconnect_timeout: default_reconnect_timeout(),
+            ca_cert: ca_cert_pem.clone(),
+            cert,
+            priv_key,
+            peers,
         };
 
-        let path = format!("peer{}.toml", i);
-        let mut f = File::create(&path).unwrap();
-        f.write_all(toml::to_string_pretty(&config).unwrap().as_bytes())
-            .unwrap();
+        let path = format!("{}/{}-{}/config.toml", config_dir, chain_name, i);
+        write_to_file(network_config, path, "network_tls".to_string());
     });
 }
 
-pub fn load_config(path: impl AsRef<Path>) -> NetworkConfig {
-    let s = {
-        let mut f = File::open(path).unwrap();
-        let mut buf = String::new();
-        f.read_to_string(&mut buf).unwrap();
-        buf
-    };
+impl NetworkConfig {
+    pub fn new(config_str: &str) -> Self {
+        read_toml(config_str, "network_tls")
+    }
+}
 
-    let config: Value = s.parse().unwrap();
-    NetworkConfig::deserialize(config["network"].clone()).unwrap()
+pub fn write_to_file<T: Serialize>(content: T, path: impl AsRef<Path>, name: String) {
+    let value = Value::try_from(content).unwrap();
+    let mut table = toml::map::Map::new();
+    table.insert(name, value);
+    let toml = toml::Value::Table(table);
+
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path.as_ref())
+        .unwrap();
+    file.write_all(toml::to_string_pretty(&toml).unwrap().as_bytes())
+        .unwrap();
+    file.write_all(b"\n").unwrap();
 }
