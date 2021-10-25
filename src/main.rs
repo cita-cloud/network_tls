@@ -53,6 +53,7 @@ fn main() {
         .about("generate TEST-ONLY network config")
         .arg(
             Arg::new("peer-count")
+                .about("how many peers to generate")
                 .takes_value(true)
                 .validator(|s| s.parse::<usize>())
                 .default_value("2"),

@@ -9,8 +9,6 @@ use rcgen::IsCa;
 use rcgen::KeyPair;
 use rcgen::PKCS_ECDSA_P256_SHA256;
 
-use toml::Value;
-
 use serde::{Deserialize, Serialize};
 
 fn default_reconnect_timeout() -> u64 {
@@ -49,6 +47,7 @@ pub struct NetworkConfig {
 // a wrapper
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Config {
+    #[serde(rename = "network_tls")]
     network: NetworkConfig,
 }
 
@@ -87,7 +86,7 @@ pub fn generate_config(peer_count: usize) {
     let peers: Vec<PeerConfig> = (0..peer_count)
         .map(|i| {
             let domain = format!("peer{}.fy", i);
-            let port = (30000 + i * 1000) as u16;
+            let port = (40000 + i) as u16;
             PeerConfig {
                 host: "localhost".into(),
                 port,
@@ -130,6 +129,6 @@ pub fn load_config(path: impl AsRef<Path>) -> NetworkConfig {
         buf
     };
 
-    let config: Value = s.parse().unwrap();
-    NetworkConfig::deserialize(config["network"].clone()).unwrap()
+    let config: Config = toml::from_str(&s).unwrap();
+    config.network
 }
