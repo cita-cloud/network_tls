@@ -7,7 +7,8 @@ use tokio_util::codec::{Decoder, Encoder};
 
 use crate::proto::NetworkMsg;
 
-const MAX_FRAME_LEN: u32 = 128 * 1024 * 1024;
+// todo config
+const MAX_FRAME_LEN: u32 = 256 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
