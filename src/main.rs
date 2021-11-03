@@ -88,6 +88,19 @@ fn main() {
                 .with_writer(writer)
                 .init();
 
+            std::panic::set_hook(Box::new(|panic| {
+                if let Some(location) = panic.location() {
+                    tracing::error!(
+                        message = %panic,
+                        panic.file = location.file(),
+                        panic.line = location.line(),
+                        panic.column = location.column(),
+                    );
+                } else {
+                    tracing::error!(message = %panic);
+                }
+            }));
+
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(Server::setup(config));
         }

@@ -7,7 +7,10 @@ use tokio_util::codec::{Decoder, Encoder};
 
 use crate::proto::NetworkMsg;
 
-const MAX_FRAME_LEN: u32 = 128 * 1024 * 1024;
+// MAX_FRAME_LEN must be the same on all peers.
+// Sending a msg larger than the targeting peer's MAX_FRAME_LEN will be rejected.
+// I prefer not to add this to config.
+const MAX_FRAME_LEN: u32 = 256 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
