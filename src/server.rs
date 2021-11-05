@@ -1,7 +1,5 @@
 use std::collections::HashMap;
 use std::io::BufReader;
-use std::net::IpAddr;
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tracing::{error, info, warn};
@@ -402,7 +400,7 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         &self,
         request: Request<NodeNetInfo>,
     ) -> Result<Response<StatusCode>, tonic::Status> {
-        let (ip, port, domain) = parse_multiaddr(&request.into_inner().multi_address)?;
+        let (host, port, domain) = parse_multiaddr(&request.into_inner().multi_address)?;
 
         let mut peers = self.peers.write().await;
         if peers.contains_key(&domain) {
@@ -412,7 +410,7 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         let (peer, handle) = Peer::new(
             peers.len() as u64 + 1,
             domain.clone(),
-            ip.to_string(),
+            host,
             port,
             self.tls_config.clone(),
             self.reconnect_timeout,
@@ -435,18 +433,7 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         let mut node_infos: Vec<NodeNetInfo> = vec![];
         let peers = self.peers.read().await;
         for (domain, p) in peers.iter() {
-            let multiaddr = match build_multiaddr(p.host(), p.port(), domain) {
-                Some(multiaddr) => multiaddr,
-                None => {
-                    warn!(
-                        peer.domain = %domain,
-                        peer.host = p.host(),
-                        peer.port = p.port(),
-                        "get peers net info encounter a unresolved socket addr"
-                    );
-                    continue;
-                }
-            };
+            let multiaddr = build_multiaddr(p.host(), p.port(), domain);
             node_infos.push(NodeNetInfo {
                 multi_address: multiaddr.to_string(),
                 origin: p.id(),
@@ -494,21 +481,27 @@ impl NetworkMsgDispatcher {
     }
 }
 
-fn parse_multiaddr(s: &str) -> Result<(IpAddr, u16, String), tonic::Status> {
+fn parse_multiaddr(s: &str) -> Result<(String, u16, String), tonic::Status> {
     let multiaddr = s
         .parse::<MultiAddr>()
         .map_err(|e| tonic::Status::invalid_argument(format!("parse multiaddr failed: `{}`", e)))?;
 
-    let mut ip: Option<IpAddr> = None;
+    let mut host: Option<String> = None;
     let mut port: Option<u16> = None;
     let mut domain: Option<String> = None;
     for ptcl in multiaddr.iter() {
         match ptcl {
+            Protocol::Dns4(dns4) => {
+                host.replace(dns4.into());
+            }
+            Protocol::Dns6(dns6) => {
+                host.replace(dns6.into());
+            }
             Protocol::Ip4(ipv4) => {
-                ip.replace(IpAddr::V4(ipv4));
+                host.replace(ipv4.to_string());
             }
             Protocol::Ip6(ipv6) => {
-                ip.replace(IpAddr::V6(ipv6));
+                host.replace(ipv6.to_string());
             }
             Protocol::Tcp(p) => {
                 port.replace(p);
@@ -520,43 +513,26 @@ fn parse_multiaddr(s: &str) -> Result<(IpAddr, u16, String), tonic::Status> {
         }
     }
 
-    let ip = ip.ok_or_else(|| tonic::Status::invalid_argument("ip not present in multiaddr"))?;
+    let host =
+        host.ok_or_else(|| tonic::Status::invalid_argument("host not present in multiaddr"))?;
     let port =
         port.ok_or_else(|| tonic::Status::invalid_argument("port not present in multiaddr"))?;
     let domain =
         domain.ok_or_else(|| tonic::Status::invalid_argument("domain not present in multiaddr"))?;
 
-    Ok((ip, port, domain))
+    Ok((host, port, domain))
 }
 
-fn build_multiaddr(host: &str, port: u16, domain: &str) -> Option<String> {
-    use std::net::ToSocketAddrs;
-
-    match (host, port)
-        .to_socket_addrs()
-        .into_iter()
-        .flatten()
-        .next()?
-    {
-        SocketAddr::V4(socket_v4) => {
-            vec![
-                Protocol::Ip4(socket_v4.ip().to_owned()),
-                Protocol::Tcp(socket_v4.port()),
-                Protocol::Tls(domain.into()),
-            ]
-        }
-        SocketAddr::V6(socket_v6) => {
-            vec![
-                Protocol::Ip6(socket_v6.ip().to_owned()),
-                Protocol::Tcp(socket_v6.port()),
-                Protocol::Tls(domain.into()),
-            ]
-        }
-    }
+fn build_multiaddr(host: &str, port: u16, domain: &str) -> String {
+    // TODO: default to return Dns4 for host, consider if it' appropriate
+    vec![
+        Protocol::Dns4(host.into()),
+        Protocol::Tcp(port),
+        Protocol::Tls(domain.into()),
+    ]
     .into_iter()
     .collect::<MultiAddr>()
     .to_string()
-    .into()
 }
 
 #[cfg(test)]
@@ -566,7 +542,10 @@ mod test {
 
     #[test]
     fn test_build_multiaddr() {
-        assert!(build_multiaddr("localhost", 80, "fy").is_some());
+        assert_eq!(
+            build_multiaddr("localhost", 80, "fy"),
+            "/dns4/localhost/tcp/80/tls/fy"
+        );
     }
 
     #[test]
