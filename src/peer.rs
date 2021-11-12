@@ -17,7 +17,7 @@ use tokio_rustls::TlsConnector;
 use futures::future::poll_fn;
 use futures::SinkExt;
 
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::codec::Codec;
 use crate::codec::DecodeError;
@@ -146,7 +146,12 @@ impl Peer {
                                 Codec,
                             ));
                         }
-                        Err(_) => {
+                        Err(e) => {
+                            debug!(
+                                peer = %self.domain,
+                                reason = %e,
+                                "cannot connect to peer"
+                            );
                             reconnect_timeout_fut.as_mut().reset(time::Instant::now() + reconnect_timeout);
                         }
                     }
