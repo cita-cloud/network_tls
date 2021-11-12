@@ -9,8 +9,6 @@ use std::path::PathBuf;
 use clap::App;
 use clap::Arg;
 
-use tracing::Level;
-
 use crate::config::load_config;
 use crate::server::Server;
 
@@ -46,6 +44,15 @@ fn main() {
                 .long("log-file-name")
                 .takes_value(true)
                 .validator(|s| s.parse::<PathBuf>()),
+        )
+        .arg(
+            Arg::new("log-level")
+                .about("the log level")
+                .short('l')
+                .long("log-level")
+                .takes_value(true)
+                .possible_values(&["error", "warn", "info", "debug", "trace"])
+                .default_value("info"),
         );
 
     let gen_config_cmd = App::new("gen-config")
@@ -73,6 +80,7 @@ fn main() {
 
             let log_dir = m.value_of("log-dir");
             let log_file_name = m.value_of("log-file-name");
+            let log_level: tracing::Level = m.value_of("log-level").unwrap().parse().unwrap();
             let (writer, _guard) = if m.is_present("stdout") {
                 tracing_appender::non_blocking(std::io::stdout())
             } else {
@@ -83,7 +91,7 @@ fn main() {
             };
 
             tracing_subscriber::fmt()
-                .with_max_level(Level::INFO)
+                .with_max_level(log_level)
                 .with_ansi(false)
                 .with_writer(writer)
                 .init();
