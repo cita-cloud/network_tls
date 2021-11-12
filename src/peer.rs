@@ -17,7 +17,7 @@ use tokio_rustls::TlsConnector;
 use futures::future::poll_fn;
 use futures::SinkExt;
 
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::codec::Codec;
 use crate::codec::DecodeError;
@@ -126,10 +126,9 @@ impl Peer {
             tokio::select! {
                 // spawn task to connect to this peer; outbound stream
                 _ = reconnect_timeout_fut.as_mut(), if framed.is_none() && pending_conn.is_none() => {
-                    info!(peer = %self.domain, "connecting..");
-
                     let host = self.host.clone();
                     let port = self.port;
+                    info!(peer = %self.domain, host = %host, port = %port, "connecting..");
 
                     let domain = DNSNameRef::try_from_ascii_str(&self.domain).unwrap().to_owned();
                     let tls_config = self.tls_config.clone();
@@ -151,6 +150,8 @@ impl Peer {
                         Ok(stream) => {
                             info!(
                                 peer = %self.domain,
+                                host = %self.host,
+                                port = %self.port,
                                 r#type = %"outbound",
                                 "new connection established"
                             );
@@ -159,7 +160,14 @@ impl Peer {
                                 Codec,
                             ));
                         }
-                        Err(_) => {
+                        Err(e) => {
+                            debug!(
+                                peer = %self.domain,
+                                host = %self.host,
+                                port = %self.port,
+                                reason = %e,
+                                "cannot connect to peer"
+                            );
                             reconnect_timeout_fut.as_mut().reset(time::Instant::now() + reconnect_timeout);
                         }
                     }
@@ -171,8 +179,15 @@ impl Peer {
                     }
                     // receive new stream
                     if framed.is_none() {
+                        let incoming_peer_addr = stream.get_ref().0
+                            .peer_addr()
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|e| format!("`unavalable: {}`", e));
                         info!(
                             peer = %self.domain,
+                            host = %self.host,
+                            port = %self.port,
+                            incoming_peer_addr = ?incoming_peer_addr,
                             r#type = %"inbound",
                             "new connection established"
                         );
@@ -208,6 +223,8 @@ impl Peer {
                         if let Err(e) = last_result {
                             warn!(
                                 peer = %self.domain,
+                                host = %self.host,
+                                port = %self.port,
                                 reason = %e,
                                 "send outbound msgs failed, drop the stream"
                             );
@@ -217,6 +234,8 @@ impl Peer {
                     } else {
                         warn!(
                             peer = %self.domain,
+                            host = %self.host,
+                            port = %self.port,
                             msgs_cnt = %msgs.len(),
                             "drop outbound msgs since no available stream to this peer"
                         );
@@ -240,6 +259,8 @@ impl Peer {
                                 // drop the stream
                                 warn!(
                                     peer = %self.domain,
+                                    host = %self.host,
+                                    port = %self.port,
                                     reason = %e,
                                     "framed stream report io error, will drop the stream"
                                 );
@@ -248,6 +269,8 @@ impl Peer {
                             Some(Err(e)) => {
                                 warn!(
                                     peer = %self.domain,
+                                    host = %self.host,
+                                    port = %self.port,
                                     reason = %e,
                                     "framed stream report decode error"
                                 );
@@ -256,6 +279,8 @@ impl Peer {
                             None => {
                                 warn!(
                                     peer = %self.domain,
+                                    host = %self.host,
+                                    port = %self.port,
                                     "framed stream end, will drop it"
                                 );
                                 true
@@ -289,7 +314,12 @@ impl Peer {
                     }
                 }
                 else => {
-                    info!("Peer `{}` stoped.", self.domain);
+                    info!(
+                        peer = %self.domain,
+                        host = %self.host,
+                        port = %self.port,
+                        "Peer stopped",
+                    );
                 }
             }
         }
