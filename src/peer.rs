@@ -51,12 +51,18 @@ impl PeerHandle {
         self.port
     }
 
-    pub async fn accept(&self, stream: ServerTlsStream) {
-        self.inbound_stream_tx.send(stream).await.unwrap();
+    pub fn accept(&self, stream: ServerTlsStream) {
+        let inbound_stream_tx = self.inbound_stream_tx.clone();
+        tokio::spawn(async move {
+            let _ = inbound_stream_tx.send(stream).await;
+        });
     }
 
-    pub async fn send_msg(&self, msg: NetworkMsg) {
-        self.outbound_msg_tx.send(msg).await.unwrap();
+    pub fn send_msg(&self, msg: NetworkMsg) {
+        let outbound_msg_tx = self.outbound_msg_tx.clone();
+        tokio::spawn(async move {
+            let _ = outbound_msg_tx.send(msg).await;
+        });
     }
 }
 

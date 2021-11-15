@@ -4,15 +4,16 @@ use std::sync::Arc;
 
 use tracing::{error, info, warn};
 
+use parking_lot::RwLock;
+
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-use tokio::sync::RwLock;
 use tokio_rustls::{
     rustls::{
         internal::pemfile, Certificate, ClientCertVerified, ClientCertVerifier, ClientConfig,
         DistinguishedNames, OwnedTrustAnchor, RootCertStore, ServerConfig, Session, TLSError,
     },
-    webpki::{self, DNSName, DNSNameRef},
+    webpki::{self, DNSNameRef},
     TlsAcceptor,
 };
 
@@ -94,12 +95,12 @@ fn prepare<'a, 'b>(
     Ok((cert, chain, trustroots))
 }
 
-struct AllowKnownClientOnly {
+struct AllowKnownPeerOnly {
     roots: RootCertStore,
-    known: Vec<DNSName>,
+    peers: Arc<RwLock<HashMap<String, PeerHandle>>>,
 }
 
-impl ClientCertVerifier for AllowKnownClientOnly {
+impl ClientCertVerifier for AllowKnownPeerOnly {
     fn offer_client_auth(&self) -> bool {
         true
     }
@@ -130,7 +131,12 @@ impl ClientCertVerifier for AllowKnownClientOnly {
         )
         .map_err(TLSError::WebPKIError)?;
 
-        cert.verify_is_valid_for_at_least_one_dns_name(self.known.iter().map(|n| n.as_ref()))
+        let guard = self.peers.read();
+        let known = guard
+            .keys()
+            .map(|k| DNSNameRef::try_from_ascii(k.as_bytes()).unwrap());
+
+        cert.verify_is_valid_for_at_least_one_dns_name(known)
             .map_err(TLSError::WebPKIError)?;
 
         Ok(ClientCertVerified::assertion())
@@ -171,26 +177,6 @@ impl Server {
             Arc::new(client_config)
         };
 
-        let tls_acceptor = {
-            let mut server_config = {
-                let known = config
-                    .peers
-                    .iter()
-                    .map(|c| {
-                        DNSNameRef::try_from_ascii(c.domain.as_bytes())
-                            .unwrap()
-                            .to_owned()
-                    })
-                    .collect();
-
-                let verifier = AllowKnownClientOnly { roots, known };
-                ServerConfig::new(Arc::new(verifier))
-            };
-            server_config.set_single_cert(certs, priv_key).unwrap();
-
-            TlsAcceptor::from(Arc::new(server_config))
-        };
-
         let (inbound_msg_tx, inbound_msg_rx) = mpsc::channel(1024);
         let peers = {
             let mut peers = HashMap::new();
@@ -211,6 +197,19 @@ impl Server {
                 peers.insert(c.domain, handle);
             }
             Arc::new(RwLock::new(peers))
+        };
+
+        let tls_acceptor = {
+            let mut server_config = {
+                let verifier = AllowKnownPeerOnly {
+                    roots,
+                    peers: peers.clone(),
+                };
+                ServerConfig::new(Arc::new(verifier))
+            };
+            server_config.set_single_cert(certs, priv_key).unwrap();
+
+            TlsAcceptor::from(Arc::new(server_config))
         };
 
         let dispatch_table = Arc::new(RwLock::new(HashMap::new()));
@@ -290,9 +289,9 @@ impl Server {
                         .collect()
                 };
 
-                let guard = peers.read().await;
+                let guard = peers.read();
                 if let Some(peer) = dns_s.iter().find_map(|dns| guard.get(dns)) {
-                    peer.accept(stream).await;
+                    peer.accept(stream);
                 } else {
                     error!(
                         peers = ?&*guard,
@@ -325,15 +324,15 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         // This origin only used in local context, and shouldn't leak outside.
         let origin = msg.origin;
         msg.origin = 0;
-        let guard = self.peers.read().await;
+        let guard = self.peers.read();
 
         if let Some(peer) = guard.values().find(|peer| peer.id() == origin) {
-            peer.send_msg(msg).await;
+            peer.send_msg(msg);
         } else {
             // TODO: check if it's necessary
             // fallback to broadcast
             for peer in guard.values() {
-                peer.send_msg(msg.clone()).await;
+                peer.send_msg(msg.clone());
             }
         }
 
@@ -348,10 +347,10 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         let mut msg = request.into_inner();
         // This origin only used in local context, and shouldn't leak outside.
         msg.origin = 0;
-        let guard = self.peers.read().await;
+        let guard = self.peers.read();
 
         for peer in guard.values() {
-            peer.send_msg(msg.clone()).await;
+            peer.send_msg(msg.clone());
         }
 
         let ok = StatusCode { code: 0 };
@@ -363,7 +362,7 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         _request: Request<Empty>,
     ) -> Result<Response<NetworkStatusResponse>, tonic::Status> {
         let reply = NetworkStatusResponse {
-            peer_count: self.peers.read().await.len() as u64,
+            peer_count: self.peers.read().len() as u64,
         };
 
         Ok(Response::new(reply))
@@ -389,7 +388,7 @@ impl NetworkService for CitaCloudNetworkServiceServer {
             NetworkMsgHandlerServiceClient::new(channel)
         };
 
-        let mut dispatch_table = self.dispatch_table.write().await;
+        let mut dispatch_table = self.dispatch_table.write();
         dispatch_table.insert(module_name, client);
 
         let ok = StatusCode { code: 0 };
@@ -400,9 +399,15 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         &self,
         request: Request<NodeNetInfo>,
     ) -> Result<Response<StatusCode>, tonic::Status> {
-        let (host, port, domain) = parse_multiaddr(&request.into_inner().multi_address)?;
+        let multiaddr = request.into_inner().multi_address;
+        let (host, port, domain) = parse_multiaddr(&multiaddr)?;
+        info!(
+            multiaddr = %multiaddr,
+            host = %host, port = %port, domain = %domain,
+            "attempts to add new peer"
+        );
 
-        let mut peers = self.peers.write().await;
+        let mut peers = self.peers.write();
         if peers.contains_key(&domain) {
             return Err(tonic::Status::invalid_argument("peer is already in config"));
         }
@@ -410,7 +415,7 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         let (peer, handle) = Peer::new(
             peers.len() as u64 + 1,
             domain.clone(),
-            host,
+            host.clone(),
             port,
             self.tls_config.clone(),
             self.reconnect_timeout,
@@ -420,8 +425,13 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         tokio::spawn(async move {
             peer.run().await;
         });
-        peers.insert(domain, handle);
+        peers.insert(domain.clone(), handle);
 
+        info!(
+            multiaddr = %multiaddr,
+            host = %host, port = %port, domain = %domain,
+            "new peer added"
+        );
         let ok = StatusCode { code: 0 };
         Ok(Response::new(ok))
     }
@@ -431,7 +441,7 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         _request: Request<Empty>,
     ) -> Result<Response<TotalNodeNetInfo>, tonic::Status> {
         let mut node_infos: Vec<NodeNetInfo> = vec![];
-        let peers = self.peers.read().await;
+        let peers = self.peers.read();
         for (domain, p) in peers.iter() {
             let multiaddr = build_multiaddr(p.host(), p.port(), domain);
             node_infos.push(NodeNetInfo {
@@ -453,7 +463,7 @@ impl NetworkMsgDispatcher {
     async fn run(mut self) {
         while let Some(msg) = self.inbound_msg_rx.recv().await {
             let client = {
-                let guard = self.dispatch_table.read().await;
+                let guard = self.dispatch_table.read();
                 guard.get(&msg.module).cloned()
             };
 
