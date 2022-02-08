@@ -32,20 +32,20 @@ fn main() {
         .about("run network service")
         .arg(
             Arg::new("config")
-                .about("the network config")
+                .help("the network config")
                 .takes_value(true)
                 .validator(|s| s.parse::<PathBuf>())
                 .default_value("config.toml"),
         )
         .arg(
             Arg::new("stdout")
-                .about("if specified, log to stdout")
+                .help("if specified, log to stdout")
                 .long("stdout")
                 .conflicts_with_all(&["log-dir", "log-file-name"]),
         )
         .arg(
             Arg::new("log-dir")
-                .about("the log dir")
+                .help("the log dir")
                 .short('d')
                 .long("log-dir")
                 .takes_value(true)
@@ -53,7 +53,7 @@ fn main() {
         )
         .arg(
             Arg::new("log-file-name")
-                .about("the log file name")
+                .help("the log file name")
                 .short('f')
                 .long("log-file-name")
                 .takes_value(true)
@@ -61,7 +61,7 @@ fn main() {
         )
         .arg(
             Arg::new("log-level")
-                .about("the log level")
+                .help("the log level")
                 .short('l')
                 .long("log-level")
                 .takes_value(true)
@@ -74,7 +74,7 @@ fn main() {
         .about("generate TEST-ONLY network config")
         .arg(
             Arg::new("peer-count")
-                .about("how many peers to generate")
+                .help("how many peers to generate")
                 .takes_value(true)
                 .validator(|s| s.parse::<usize>())
                 .default_value("2"),
