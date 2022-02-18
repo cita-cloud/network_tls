@@ -20,14 +20,14 @@ mod server;
 
 use std::path::PathBuf;
 
-use clap::App;
 use clap::Arg;
+use clap::Command;
 
 use crate::config::load_config;
 use crate::server::Server;
 
 fn main() {
-    let run_cmd = App::new("run")
+    let run_cmd = Command::new("run")
         .alias("r")
         .about("run network service")
         .arg(
@@ -69,7 +69,7 @@ fn main() {
                 .default_value("info"),
         );
 
-    let gen_config_cmd = App::new("gen-config")
+    let gen_config_cmd = Command::new("gen-config")
         .alias("g")
         .about("generate TEST-ONLY network config")
         .arg(
@@ -80,7 +80,7 @@ fn main() {
                 .default_value("2"),
         );
 
-    let app = App::new("network")
+    let app = Command::new("network")
         .about("Network service for CITA-Cloud")
         .subcommands([run_cmd, gen_config_cmd]);
 
