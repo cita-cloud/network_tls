@@ -423,7 +423,7 @@ impl NetworkService for CitaCloudNetworkServiceServer {
 
         let mut peers = self.peers.write();
         if peers.contains_key(&domain) {
-            return Err(tonic::Status::invalid_argument("peer is already in config"));
+            return Ok(Response::new(StatusCode { code: 405 }));
         }
 
         let (peer, handle) = Peer::new(
@@ -446,8 +446,8 @@ impl NetworkService for CitaCloudNetworkServiceServer {
             host = %host, port = %port, domain = %domain,
             "new peer added"
         );
-        let ok = StatusCode { code: 0 };
-        Ok(Response::new(ok))
+
+        Ok(Response::new(StatusCode { code: 0 }))
     }
 
     async fn get_peers_net_info(
