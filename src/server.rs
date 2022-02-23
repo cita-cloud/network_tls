@@ -15,10 +15,12 @@
 use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
 use std::io::BufReader;
+use std::sync::mpsc::{channel, TryRecvError};
 use std::sync::Arc;
 use std::time::SystemTime;
+use std::time::Duration;
 
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use parking_lot::RwLock;
 
@@ -45,8 +47,10 @@ use tentacle_multiaddr::MultiAddr;
 use tentacle_multiaddr::Protocol;
 
 use crate::peer::PeersManger;
+use notify::{DebouncedEvent, RecommendedWatcher, RecursiveMode, Watcher};
+
 use crate::{
-    config::NetworkConfig,
+    config::{load_config, NetworkConfig},
     peer::Peer,
     proto::{
         Empty, NetworkMsg, NetworkMsgHandlerServiceClient, NetworkService, NetworkServiceServer,
@@ -213,7 +217,7 @@ pub struct Server {
 }
 
 impl Server {
-    pub async fn setup(config: NetworkConfig) {
+    pub async fn setup(config: NetworkConfig, path: String) {
         let certs = {
             let mut rd = BufReader::new(config.cert.as_bytes());
             pemfile::certs(&mut rd).unwrap()
@@ -291,6 +295,52 @@ impl Server {
             inbound_msg_tx,
             reconnect_timeout: config.reconnect_timeout,
         };
+
+        //hot update
+        let network_svc_hot_update = network_svc.clone();
+        let file_event_send_delay = config.file_event_send_delay;
+        let try_hot_update_interval = config.try_hot_update_interval;
+        tokio::spawn(async move {
+            let (tx, rx) = channel();
+            let mut watcher: RecommendedWatcher =
+                Watcher::new(tx, Duration::from_secs(file_event_send_delay)).unwrap();
+            if let Err(e) = watcher.watch(&path[..], RecursiveMode::NonRecursive) {
+                warn!(
+                    "monitor config file: ({}) failed by error {:?}",
+                    &path[..],
+                    e
+                );
+                return;
+            }
+            info!("monitoring config file: ({})", &path[..]);
+            let mut try_hot_update_interval =
+                tokio::time::interval(Duration::from_secs(try_hot_update_interval));
+            loop {
+                try_hot_update_interval.tick().await;
+                let recv = rx.try_recv();
+                match recv {
+                    Ok(event) => match event {
+                        DebouncedEvent::Write(_) => {
+                            debug!("detected config file: ({}) changed", &path[..]);
+                            try_hot_update(&path[..], network_svc_hot_update.clone()).await;
+                        }
+                        DebouncedEvent::Remove(_) => {
+                            warn!("detected config file: ({}) removed", &path[..])
+                        }
+                        DebouncedEvent::Create(_) => {
+                            warn!("detected config file: ({}) created", &path[..])
+                        }
+                        _ => (),
+                    },
+                    Err(e) => {
+                        if e != TryRecvError::Empty {
+                            warn!("monitor config file: {} error: {:?}", &path[..], e);
+                        }
+                    }
+                };
+            }
+        });
+
         let grpc_addr = format!("0.0.0.0:{}", config.grpc_port).parse().unwrap();
         tokio::spawn(async move {
             tonic::transport::Server::builder()
@@ -370,6 +420,7 @@ impl Server {
     }
 }
 
+#[derive(Clone)]
 pub struct CitaCloudNetworkServiceServer {
     dispatch_table: Arc<RwLock<HashMap<String, NetworkMsgHandlerServiceClient<Channel>>>>,
     peers: Arc<RwLock<PeersManger>>,
@@ -474,7 +525,7 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         info!(
             multiaddr = %multiaddr,
             host = %host, port = %port, domain = %domain,
-            "attempts to add new peer"
+            "attempt to add new peer"
         );
 
         let mut guard = self.peers.write();
@@ -616,6 +667,58 @@ fn calculate_hash<T: Hash>(t: &T) -> u64 {
     let mut s = DefaultHasher::new();
     t.hash(&mut s);
     s.finish()
+}
+
+async fn try_hot_update(path: &str, network_svc_hot_update: CitaCloudNetworkServiceServer) {
+    let new_config = if let Ok(config) = load_config(path) {
+        config
+    } else {
+        warn!("load config file: ({}) failed, check format", path);
+        return;
+    };
+    let old_peers = network_svc_hot_update
+        .peers
+        .read()
+        .iter()
+        .map(|(s, _)| s.to_owned())
+        .collect::<Vec<String>>();
+    info!("already connected peers: {:?}", old_peers);
+    let new_peers = new_config
+        .peers
+        .iter()
+        .map(|p| p.domain.to_owned())
+        .collect::<Vec<String>>();
+    info!("peers in config file: {:?}", new_peers);
+    for p in new_config.peers {
+        if !network_svc_hot_update.peers.read().contains_key(&p.domain) {
+            let multiaddr = build_multiaddr(&p.host, p.port, &p.domain);
+            info!(
+                multiaddr = %multiaddr,
+                host = %p.host, port = %p.port, domain = %p.domain,
+                "attempt to hot update new peer"
+            );
+            let mut peers = network_svc_hot_update.peers.write();
+            let (peer, handle) = Peer::new(
+                peers.len() as u64 + 1,
+                p.domain.clone(),
+                p.host.clone(),
+                p.port,
+                network_svc_hot_update.tls_config.clone(),
+                network_svc_hot_update.reconnect_timeout,
+                network_svc_hot_update.inbound_msg_tx.clone(),
+            );
+
+            tokio::spawn(async move { peer.run().await });
+
+            peers.insert(p.domain.clone(), handle);
+
+            info!(
+                multiaddr = %multiaddr,
+                host = %p.host, port = %p.port, domain = %p.domain,
+                "new peer added"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

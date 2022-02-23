@@ -87,10 +87,8 @@ fn main() {
     let matches = app.get_matches();
     match matches.subcommand() {
         Some(("run", m)) => {
-            let config = {
-                let path = m.value_of("config").unwrap();
-                load_config(path)
-            };
+            let path = m.value_of("config").unwrap();
+            let config = load_config(path).unwrap();
 
             let log_dir = m.value_of("log-dir");
             let log_file_name = m.value_of("log-file-name");
@@ -124,7 +122,7 @@ fn main() {
             }));
 
             let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(Server::setup(config));
+            rt.block_on(Server::setup(config, path.to_string()));
         }
         Some(("gen-config", m)) => {
             let peer_count = m.value_of("peer-count").unwrap().parse::<usize>().unwrap();
