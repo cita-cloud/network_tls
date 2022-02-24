@@ -15,8 +15,9 @@
 use std::collections::HashMap;
 use std::io::BufReader;
 use std::sync::Arc;
+use std::time::SystemTime;
 
-use tracing::{error, info, warn};
+use tracing::{error, info, trace, warn};
 
 use parking_lot::RwLock;
 
@@ -25,9 +26,10 @@ use tokio::sync::mpsc;
 use tokio_rustls::{
     rustls::{
         internal::pemfile, Certificate, ClientCertVerified, ClientCertVerifier, ClientConfig,
-        DistinguishedNames, OwnedTrustAnchor, RootCertStore, ServerConfig, Session, TLSError,
+        DistinguishedNames, OwnedTrustAnchor, RootCertStore, ServerCertVerified,
+        ServerCertVerifier, ServerConfig, Session, TLSError,
     },
-    webpki::{self, DNSNameRef},
+    webpki::{self, DNSNameRef, Time},
     TlsAcceptor,
 };
 
@@ -41,10 +43,12 @@ use x509_parser::traits::FromDer;
 use tentacle_multiaddr::MultiAddr;
 use tentacle_multiaddr::Protocol;
 
+use crc64::crc64;
+
+use crate::peer::PeersManger;
 use crate::{
     config::NetworkConfig,
     peer::Peer,
-    peer::PeerHandle,
     proto::{
         Empty, NetworkMsg, NetworkMsgHandlerServiceClient, NetworkService, NetworkServiceServer,
         NetworkStatusResponse, NodeNetInfo, RegisterInfo, StatusCode, TotalNodeNetInfo,
@@ -109,9 +113,10 @@ fn prepare<'a, 'b>(
     Ok((cert, chain, trustroots))
 }
 
+#[derive(Debug, Clone)]
 struct AllowKnownPeerOnly {
     roots: RootCertStore,
-    peers: Arc<RwLock<HashMap<String, PeerHandle>>>,
+    peers: Arc<RwLock<PeersManger>>,
 }
 
 impl ClientCertVerifier for AllowKnownPeerOnly {
@@ -145,21 +150,65 @@ impl ClientCertVerifier for AllowKnownPeerOnly {
         )
         .map_err(TLSError::WebPKIError)?;
 
-        let guard = self.peers.read();
-        let known = guard
+        let mut guard = self.peers.write();
+        let from_config_peers = guard.get_from_config_peers().clone();
+        let known = from_config_peers
             .keys()
             .map(|k| DNSNameRef::try_from_ascii(k.as_bytes()).unwrap());
 
-        cert.verify_is_valid_for_at_least_one_dns_name(known)
+        let valid_dns = cert
+            .verify_is_valid_for_at_least_one_dns_name(known)
             .map_err(TLSError::WebPKIError)?;
+
+        for vd in valid_dns {
+            guard.add_connected_peers(vd.into());
+        }
 
         Ok(ClientCertVerified::assertion())
     }
 }
 
+impl ServerCertVerifier for AllowKnownPeerOnly {
+    /// Will verify the certificate is valid in the following ways:
+    /// - Signed by a  trusted `RootCertStore` CA
+    /// - Not Expired
+    /// - Valid for DNS entry
+    /// - OCSP data is present
+    fn verify_server_cert(
+        &self,
+        roots: &RootCertStore,
+        presented_certs: &[Certificate],
+        dns_name: webpki::DNSNameRef,
+        ocsp_response: &[u8],
+    ) -> Result<ServerCertVerified, TLSError> {
+        let (cert, chain, trustroots) = prepare(roots, presented_certs)?;
+        let cert = cert
+            .verify_is_valid_tls_server_cert(
+                SUPPORTED_SIG_ALGS,
+                &webpki::TLSServerTrustAnchors(&trustroots),
+                &chain,
+                Time::try_from(SystemTime::now()).unwrap(),
+            )
+            .map_err(TLSError::WebPKIError)
+            .map(|_| cert)?;
+
+        if !ocsp_response.is_empty() {
+            trace!("Unvalidated OCSP response: {:?}", ocsp_response.to_vec());
+        }
+
+        cert.verify_is_valid_for_dns_name(dns_name)
+            .map_err(TLSError::WebPKIError)?;
+
+        let mut guard = self.peers.write();
+        guard.add_connected_peers(dns_name.into());
+
+        Ok(ServerCertVerified::assertion())
+    }
+}
+
 pub struct Server {
     listen_port: u16,
-    peers: Arc<RwLock<HashMap<String, PeerHandle>>>,
+    peers: Arc<RwLock<PeersManger>>,
 
     tls_acceptor: TlsAcceptor,
 }
@@ -182,45 +231,49 @@ impl Server {
             roots
         };
 
+        let verifier = AllowKnownPeerOnly {
+            roots: roots.clone(),
+            peers: Arc::new(RwLock::new(PeersManger::new(HashMap::new()))),
+        };
+
         let client_config = {
             let mut client_config = ClientConfig::new();
-            client_config.root_store = roots.clone();
+            client_config.root_store = roots;
             client_config
                 .set_single_client_cert(certs.clone(), priv_key.clone())
                 .unwrap();
+            client_config
+                .dangerous()
+                .set_certificate_verifier(Arc::new(verifier.clone()));
             Arc::new(client_config)
         };
 
         let (inbound_msg_tx, inbound_msg_rx) = mpsc::channel(1024);
         let peers = {
-            let mut peers = HashMap::new();
-            for (id, c) in config.peers.into_iter().enumerate() {
+            for c in config.peers.into_iter() {
                 let (peer, handle) = Peer::new(
                     // start from 1
-                    (id + 1) as u64,
+                    crc64(0, format!("{}:{}", &c.host, c.port).as_bytes()),
                     c.domain.clone(),
                     c.host,
                     c.port,
-                    client_config.clone(),
+                    Arc::clone(&client_config),
                     config.reconnect_timeout,
                     inbound_msg_tx.clone(),
                 );
                 tokio::spawn(async move {
                     peer.run().await;
                 });
-                peers.insert(c.domain, handle);
+                verifier
+                    .peers
+                    .write()
+                    .add_from_config_peers(c.domain.clone(), handle.clone());
             }
-            Arc::new(RwLock::new(peers))
+            Arc::clone(&verifier.peers)
         };
 
         let tls_acceptor = {
-            let mut server_config = {
-                let verifier = AllowKnownPeerOnly {
-                    roots,
-                    peers: peers.clone(),
-                };
-                ServerConfig::new(Arc::new(verifier))
-            };
+            let mut server_config = { ServerConfig::new(Arc::new(verifier)) };
             server_config.set_single_cert(certs, priv_key).unwrap();
 
             TlsAcceptor::from(Arc::new(server_config))
@@ -304,7 +357,10 @@ impl Server {
                 };
 
                 let guard = peers.read();
-                if let Some(peer) = dns_s.iter().find_map(|dns| guard.get(dns)) {
+                if let Some(peer) = dns_s
+                    .iter()
+                    .find_map(|dns| guard.get_from_config_peers().get(dns))
+                {
                     peer.accept(stream);
                 } else {
                     error!(
@@ -320,7 +376,7 @@ impl Server {
 
 pub struct CitaCloudNetworkServiceServer {
     dispatch_table: Arc<RwLock<HashMap<String, NetworkMsgHandlerServiceClient<Channel>>>>,
-    peers: Arc<RwLock<HashMap<String, PeerHandle>>>,
+    peers: Arc<RwLock<PeersManger>>,
 
     // for adding new node
     tls_config: Arc<ClientConfig>,
@@ -340,12 +396,16 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         msg.origin = 0;
         let guard = self.peers.read();
 
-        if let Some(peer) = guard.values().find(|peer| peer.id() == origin) {
+        if let Some(peer) = guard
+            .get_connected_peers()
+            .values()
+            .find(|peer| peer.id() == origin)
+        {
             peer.send_msg(msg);
         } else {
             // TODO: check if it's necessary
             // fallback to broadcast
-            for peer in guard.values() {
+            for peer in guard.get_connected_peers().values() {
                 peer.send_msg(msg.clone());
             }
         }
@@ -363,7 +423,7 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         msg.origin = 0;
         let guard = self.peers.read();
 
-        for peer in guard.values() {
+        for peer in guard.get_connected_peers().values() {
             peer.send_msg(msg.clone());
         }
 
@@ -376,7 +436,7 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         _request: Request<Empty>,
     ) -> Result<Response<NetworkStatusResponse>, tonic::Status> {
         let reply = NetworkStatusResponse {
-            peer_count: self.peers.read().len() as u64,
+            peer_count: self.peers.read().get_connected_peers().len() as u64,
         };
 
         Ok(Response::new(reply))
@@ -421,13 +481,13 @@ impl NetworkService for CitaCloudNetworkServiceServer {
             "attempts to add new peer"
         );
 
-        let mut peers = self.peers.write();
-        if peers.contains_key(&domain) {
+        let mut guard = self.peers.write();
+        if guard.get_connected_peers().contains_key(&domain) {
             return Ok(Response::new(StatusCode { code: 405 }));
         }
 
         let (peer, handle) = Peer::new(
-            peers.len() as u64 + 1,
+            crc64(0, format!("{}:{}", &host, port).as_bytes()),
             domain.clone(),
             host.clone(),
             port,
@@ -436,10 +496,10 @@ impl NetworkService for CitaCloudNetworkServiceServer {
             self.inbound_msg_tx.clone(),
         );
 
+        guard.add_from_config_peers(domain.clone(), handle);
         tokio::spawn(async move {
             peer.run().await;
         });
-        peers.insert(domain.clone(), handle);
 
         info!(
             multiaddr = %multiaddr,
@@ -456,7 +516,7 @@ impl NetworkService for CitaCloudNetworkServiceServer {
     ) -> Result<Response<TotalNodeNetInfo>, tonic::Status> {
         let mut node_infos: Vec<NodeNetInfo> = vec![];
         let peers = self.peers.read();
-        for (domain, p) in peers.iter() {
+        for (domain, p) in peers.get_connected_peers().iter() {
             let multiaddr = build_multiaddr(p.host(), p.port(), domain);
             node_infos.push(NodeNetInfo {
                 multi_address: multiaddr.to_string(),

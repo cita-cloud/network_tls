@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
@@ -42,6 +43,56 @@ type ServerTlsStream = tokio_rustls::server::TlsStream<TcpStream>;
 type ClientTlsStream = tokio_rustls::client::TlsStream<TcpStream>;
 
 type Framed = tokio_util::codec::Framed<TlsStream, Codec>;
+
+#[derive(Debug, Clone)]
+pub struct PeersManger {
+    from_config_peers: HashMap<String, PeerHandle>,
+    connected_peers: HashMap<String, PeerHandle>,
+}
+
+impl PeersManger {
+    pub fn new(from_config_peers: HashMap<String, PeerHandle>) -> Self {
+        Self {
+            from_config_peers,
+            connected_peers: HashMap::new(),
+        }
+    }
+
+    pub fn get_from_config_peers(&self) -> &HashMap<String, PeerHandle> {
+        &self.from_config_peers
+    }
+
+    pub fn add_from_config_peers(
+        &mut self,
+        domain: String,
+        peer_handle: PeerHandle,
+    ) -> Option<PeerHandle> {
+        info!("add_from_config_peers: {}", domain);
+        self.from_config_peers.insert(domain, peer_handle)
+    }
+
+    pub fn get_connected_peers(&self) -> &HashMap<String, PeerHandle> {
+        &self.connected_peers
+    }
+
+    pub fn add_connected_peers(&mut self, domain: &str) -> Option<PeerHandle> {
+        info!("add_connected_peers: {}", domain);
+        self.connected_peers.insert(
+            domain.to_owned(),
+            self.get_from_config_peers().get(domain).unwrap().clone(),
+        )
+    }
+
+    #[allow(dead_code)]
+    pub fn delete_connected_peers(&mut self, domain: &str) -> Option<PeerHandle> {
+        self.connected_peers.remove(domain)
+    }
+
+    pub fn delete_peer(&mut self, domain: &str) {
+        self.from_config_peers.remove(domain);
+        self.connected_peers.remove(domain);
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct PeerHandle {
