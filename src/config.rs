@@ -25,16 +25,14 @@ use rcgen::PKCS_ECDSA_P256_SHA256;
 
 use serde::{Deserialize, Serialize};
 
+use md5::{compute, Digest};
+
 fn default_reconnect_timeout() -> u64 {
     5
 }
 
 fn default_try_hot_update_interval() -> u64 {
     60
-}
-
-fn default_file_event_send_delay() -> u64 {
-    5
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -56,9 +54,6 @@ pub struct NetworkConfig {
 
     #[serde(default = "default_try_hot_update_interval")]
     pub try_hot_update_interval: u64, // in seconds
-
-    #[serde(default = "default_file_event_send_delay")]
-    pub file_event_send_delay: u64, // in seconds
 
     pub ca_cert: String,
 
@@ -135,7 +130,6 @@ pub fn generate_config(peer_count: usize) {
                 listen_port: this.port,
                 reconnect_timeout: default_reconnect_timeout(),
                 try_hot_update_interval: default_try_hot_update_interval(),
-                file_event_send_delay: default_file_event_send_delay(),
                 ca_cert: ca_cert_pem.clone(),
                 cert,
                 priv_key,
@@ -165,4 +159,22 @@ pub fn load_config(path: impl AsRef<Path>) -> Result<NetworkConfig, ()> {
     } else {
         Err(())
     }
+}
+
+pub fn calculate_md5(path: impl AsRef<Path>) -> Result<Digest, ()> {
+    let mut f = if let Ok(f) = File::open(path) {
+        f
+    } else {
+        return Err(());
+    };
+    let mut buffer = [0; 1024];
+    let mut file = vec![];
+    while let Ok(len) = f.read(&mut buffer) {
+        if len == 0 {
+            break;
+        } else {
+            file.append(&mut buffer[..len].to_vec());
+        }
+    }
+    Ok(compute(file))
 }

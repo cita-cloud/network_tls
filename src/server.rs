@@ -15,7 +15,6 @@
 use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
 use std::io::BufReader;
-use std::sync::mpsc::{channel, TryRecvError};
 use std::sync::Arc;
 use std::time::SystemTime;
 use std::time::Duration;
@@ -47,10 +46,8 @@ use tentacle_multiaddr::MultiAddr;
 use tentacle_multiaddr::Protocol;
 
 use crate::peer::PeersManger;
-use notify::{DebouncedEvent, RecommendedWatcher, RecursiveMode, Watcher};
-
 use crate::{
-    config::{load_config, NetworkConfig},
+    config::{calculate_md5, load_config, NetworkConfig},
     peer::Peer,
     proto::{
         Empty, NetworkMsg, NetworkMsgHandlerServiceClient, NetworkService, NetworkServiceServer,
@@ -298,46 +295,33 @@ impl Server {
 
         //hot update
         let network_svc_hot_update = network_svc.clone();
-        let file_event_send_delay = config.file_event_send_delay;
         let try_hot_update_interval = config.try_hot_update_interval;
         tokio::spawn(async move {
-            let (tx, rx) = channel();
-            let mut watcher: RecommendedWatcher =
-                Watcher::new(tx, Duration::from_secs(file_event_send_delay)).unwrap();
-            if let Err(e) = watcher.watch(&path[..], RecursiveMode::NonRecursive) {
-                warn!(
-                    "monitor config file: ({}) failed by error {:?}",
-                    &path[..],
-                    e
-                );
-                return;
-            }
             info!("monitoring config file: ({})", &path[..]);
+            let mut md5 = if let Ok(md5) = calculate_md5(&path) {
+                md5
+            } else {
+                warn!("calculate config file md5 failed, hot update invalid");
+                return;
+            };
+            info!("config file original md5: {:x}", md5);
             let mut try_hot_update_interval =
                 tokio::time::interval(Duration::from_secs(try_hot_update_interval));
             loop {
                 try_hot_update_interval.tick().await;
-                let recv = rx.try_recv();
-                match recv {
-                    Ok(event) => match event {
-                        DebouncedEvent::Write(_) => {
-                            debug!("detected config file: ({}) changed", &path[..]);
-                            try_hot_update(&path[..], network_svc_hot_update.clone()).await;
-                        }
-                        DebouncedEvent::Remove(_) => {
-                            warn!("detected config file: ({}) removed", &path[..])
-                        }
-                        DebouncedEvent::Create(_) => {
-                            warn!("detected config file: ({}) created", &path[..])
-                        }
-                        _ => (),
-                    },
-                    Err(e) => {
-                        if e != TryRecvError::Empty {
-                            warn!("monitor config file: {} error: {:?}", &path[..], e);
-                        }
-                    }
+                let new_md5 = if let Ok(new_md5) = calculate_md5(&path) {
+                    new_md5
+                } else {
+                    warn!("calculate config file md5 failed, make sure not removed");
+                    continue;
                 };
+                if new_md5 == md5 {
+                    continue;
+                } else {
+                    info!("config file new md5: {:x}", new_md5);
+                    md5 = new_md5;
+                    try_hot_update(&path, &network_svc_hot_update).await;
+                }
             }
         });
 
@@ -669,7 +653,7 @@ fn calculate_hash<T: Hash>(t: &T) -> u64 {
     s.finish()
 }
 
-async fn try_hot_update(path: &str, network_svc_hot_update: CitaCloudNetworkServiceServer) {
+async fn try_hot_update(path: &str, network_svc_hot_update: &CitaCloudNetworkServiceServer) {
     let new_config = if let Ok(config) = load_config(path) {
         config
     } else {
