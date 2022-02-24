@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::hash::{Hash, Hasher};
 use std::io::BufReader;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -42,8 +43,6 @@ use x509_parser::traits::FromDer;
 
 use tentacle_multiaddr::MultiAddr;
 use tentacle_multiaddr::Protocol;
-
-use crc64::crc64;
 
 use crate::peer::PeersManger;
 use crate::{
@@ -253,7 +252,7 @@ impl Server {
             for c in config.peers.into_iter() {
                 let (peer, handle) = Peer::new(
                     // start from 1
-                    crc64(0, format!("{}:{}", &c.host, c.port).as_bytes()),
+                    calculate_hash(&format!("{}:{}", &c.host, c.port)),
                     c.domain.clone(),
                     c.host,
                     c.port,
@@ -487,7 +486,7 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         }
 
         let (peer, handle) = Peer::new(
-            crc64(0, format!("{}:{}", &host, port).as_bytes()),
+            calculate_hash(&format!("{}:{}", &host, port)),
             domain.clone(),
             host.clone(),
             port,
@@ -617,6 +616,12 @@ fn build_multiaddr(host: &str, port: u16, domain: &str) -> String {
     .into_iter()
     .collect::<MultiAddr>()
     .to_string()
+}
+
+fn calculate_hash<T: Hash>(t: &T) -> u64 {
+    let mut s = DefaultHasher::new();
+    t.hash(&mut s);
+    s.finish()
 }
 
 #[cfg(test)]

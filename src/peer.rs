@@ -67,7 +67,7 @@ impl PeersManger {
         domain: String,
         peer_handle: PeerHandle,
     ) -> Option<PeerHandle> {
-        info!("add_from_config_peers: {}", domain);
+        debug!("add_from_config_peers: {}", domain);
         self.from_config_peers.insert(domain, peer_handle)
     }
 
@@ -76,7 +76,7 @@ impl PeersManger {
     }
 
     pub fn add_connected_peers(&mut self, domain: &str) -> Option<PeerHandle> {
-        info!("add_connected_peers: {}", domain);
+        debug!("add_connected_peers: {}", domain);
         self.connected_peers.insert(
             domain.to_owned(),
             self.get_from_config_peers().get(domain).unwrap().clone(),
@@ -85,10 +85,12 @@ impl PeersManger {
 
     #[allow(dead_code)]
     pub fn delete_connected_peers(&mut self, domain: &str) -> Option<PeerHandle> {
+        debug!("delete_connected_peers: {}", domain);
         self.connected_peers.remove(domain)
     }
 
     pub fn delete_peer(&mut self, domain: &str) {
+        debug!("delete_peer: {}", domain);
         self.from_config_peers.remove(domain);
         self.connected_peers.remove(domain);
     }
