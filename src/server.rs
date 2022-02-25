@@ -250,7 +250,7 @@ impl Server {
         let (inbound_msg_tx, inbound_msg_rx) = mpsc::channel(1024);
         let peers = {
             for c in config.peers.into_iter() {
-                let (peer, handle) = Peer::new(
+                let handle = Peer::init(
                     // start from 1
                     calculate_hash(&format!("{}:{}", &c.host, c.port)),
                     c.domain.clone(),
@@ -260,13 +260,10 @@ impl Server {
                     config.reconnect_timeout,
                     inbound_msg_tx.clone(),
                 );
-                tokio::spawn(async move {
-                    peer.run().await;
-                });
                 verifier
                     .peers
                     .write()
-                    .add_from_config_peers(c.domain.clone(), handle.clone());
+                    .add_from_config_peers(c.domain.clone(), handle);
             }
             Arc::clone(&verifier.peers)
         };
@@ -485,7 +482,7 @@ impl NetworkService for CitaCloudNetworkServiceServer {
             return Ok(Response::new(StatusCode { code: 405 }));
         }
 
-        let (peer, handle) = Peer::new(
+        let handle = Peer::init(
             calculate_hash(&format!("{}:{}", &host, port)),
             domain.clone(),
             host.clone(),
@@ -496,9 +493,6 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         );
 
         guard.add_from_config_peers(domain.clone(), handle);
-        tokio::spawn(async move {
-            peer.run().await;
-        });
 
         info!(
             multiaddr = %multiaddr,

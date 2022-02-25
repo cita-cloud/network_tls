@@ -83,16 +83,21 @@ impl PeersManger {
         )
     }
 
-    #[allow(dead_code)]
-    pub fn delete_connected_peers(&mut self, domain: &str) -> Option<PeerHandle> {
-        debug!("delete_connected_peers: {}", domain);
-        self.connected_peers.remove(domain)
+    pub fn delete_connected_peers(&mut self, domain: &str) {
+        if let Some(peer_handle) = self.connected_peers.get(domain) {
+            debug!("delete_connected_peers: {}", domain);
+            peer_handle.handle.abort();
+            self.connected_peers.remove(domain);
+        }
     }
 
+    #[allow(dead_code)]
     pub fn delete_peer(&mut self, domain: &str) {
-        debug!("delete_peer: {}", domain);
-        self.from_config_peers.remove(domain);
-        self.connected_peers.remove(domain);
+        if self.from_config_peers.get(domain).is_some() {
+            debug!("delete_peer: {}", domain);
+            self.from_config_peers.remove(domain);
+            self.delete_connected_peers(domain);
+        }
     }
 }
 
@@ -103,6 +108,8 @@ pub struct PeerHandle {
     port: u16,
     inbound_stream_tx: mpsc::Sender<ServerTlsStream>,
     outbound_msg_tx: mpsc::Sender<NetworkMsg>,
+    // run handle
+    handle: Arc<JoinHandle<()>>,
 }
 
 impl PeerHandle {
@@ -152,7 +159,7 @@ pub struct Peer {
 }
 
 impl Peer {
-    pub fn new(
+    pub fn init(
         id: u64,
         domain: String,
         host: String,
@@ -160,7 +167,7 @@ impl Peer {
         tls_config: Arc<ClientConfig>,
         reconnect_timeout: u64,
         inbound_msg_tx: mpsc::Sender<NetworkMsg>,
-    ) -> (Peer, PeerHandle) {
+    ) -> PeerHandle {
         let (inbound_stream_tx, inbound_stream_rx) = mpsc::channel(1);
         let (outbound_msg_tx, outbound_msg_rx) = mpsc::channel(1024);
 
@@ -176,15 +183,18 @@ impl Peer {
             inbound_stream_rx,
         };
 
-        let handle = PeerHandle {
+        let handle = Arc::new(tokio::spawn(async move {
+            peer.run().await;
+        }));
+
+        PeerHandle {
             id,
             host,
             port,
             inbound_stream_tx,
             outbound_msg_tx,
-        };
-
-        (peer, handle)
+            handle,
+        }
     }
 
     pub async fn run(mut self) {
