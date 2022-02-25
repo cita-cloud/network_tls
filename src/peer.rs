@@ -46,29 +46,29 @@ type Framed = tokio_util::codec::Framed<TlsStream, Codec>;
 
 #[derive(Debug, Clone)]
 pub struct PeersManger {
-    from_config_peers: HashMap<String, PeerHandle>,
+    known_peers: HashMap<String, PeerHandle>,
     connected_peers: HashMap<String, PeerHandle>,
 }
 
 impl PeersManger {
-    pub fn new(from_config_peers: HashMap<String, PeerHandle>) -> Self {
+    pub fn new(known_peers: HashMap<String, PeerHandle>) -> Self {
         Self {
-            from_config_peers,
+            known_peers,
             connected_peers: HashMap::new(),
         }
     }
 
-    pub fn get_from_config_peers(&self) -> &HashMap<String, PeerHandle> {
-        &self.from_config_peers
+    pub fn get_known_peers(&self) -> &HashMap<String, PeerHandle> {
+        &self.known_peers
     }
 
-    pub fn add_from_config_peers(
+    pub fn add_known_peers(
         &mut self,
         domain: String,
         peer_handle: PeerHandle,
     ) -> Option<PeerHandle> {
         debug!("add_from_config_peers: {}", domain);
-        self.from_config_peers.insert(domain, peer_handle)
+        self.known_peers.insert(domain, peer_handle)
     }
 
     pub fn get_connected_peers(&self) -> &HashMap<String, PeerHandle> {
@@ -79,7 +79,7 @@ impl PeersManger {
         debug!("add_connected_peers: {}", domain);
         self.connected_peers.insert(
             domain.to_owned(),
-            self.get_from_config_peers().get(domain).unwrap().clone(),
+            self.get_known_peers().get(domain).unwrap().clone(),
         )
     }
 
@@ -93,9 +93,9 @@ impl PeersManger {
 
     #[allow(dead_code)]
     pub fn delete_peer(&mut self, domain: &str) {
-        if self.from_config_peers.get(domain).is_some() {
+        if self.known_peers.get(domain).is_some() {
             debug!("delete_peer: {}", domain);
-            self.from_config_peers.remove(domain);
+            self.known_peers.remove(domain);
             self.delete_connected_peers(domain);
         }
     }

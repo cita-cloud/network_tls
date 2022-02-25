@@ -16,10 +16,10 @@ use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
 use std::io::BufReader;
 use std::sync::Arc;
-use std::time::SystemTime;
 use std::time::Duration;
+use std::time::SystemTime;
 
-use tracing::{debug, error, info, trace, warn};
+use tracing::{error, info, trace, warn};
 
 use parking_lot::RwLock;
 
@@ -151,8 +151,8 @@ impl ClientCertVerifier for AllowKnownPeerOnly {
         .map_err(TLSError::WebPKIError)?;
 
         let mut guard = self.peers.write();
-        let from_config_peers = guard.get_from_config_peers().clone();
-        let known = from_config_peers
+        let known_peers = guard.get_known_peers().clone();
+        let known = known_peers
             .keys()
             .map(|k| DNSNameRef::try_from_ascii(k.as_bytes()).unwrap());
 
@@ -264,7 +264,7 @@ impl Server {
                 verifier
                     .peers
                     .write()
-                    .add_from_config_peers(c.domain.clone(), handle);
+                    .add_known_peers(c.domain.clone(), handle);
             }
             Arc::clone(&verifier.peers)
         };
@@ -389,7 +389,7 @@ impl Server {
                 let guard = peers.read();
                 if let Some(peer) = dns_s
                     .iter()
-                    .find_map(|dns| guard.get_from_config_peers().get(dns))
+                    .find_map(|dns| guard.get_known_peers().get(dns))
                 {
                     peer.accept(stream);
                 } else {
@@ -514,7 +514,12 @@ impl NetworkService for CitaCloudNetworkServiceServer {
 
         let mut guard = self.peers.write();
         if guard.get_connected_peers().contains_key(&domain) {
+            //add a connected peer
             return Ok(Response::new(StatusCode { code: 405 }));
+        }
+        if guard.get_known_peers().contains_key(&domain) {
+            //add a known peer which is already trying to connect
+            return Ok(Response::new(StatusCode { code: 0 }));
         }
 
         let handle = Peer::init(
@@ -527,12 +532,12 @@ impl NetworkService for CitaCloudNetworkServiceServer {
             self.inbound_msg_tx.clone(),
         );
 
-        guard.add_from_config_peers(domain.clone(), handle);
+        guard.add_known_peers(domain.clone(), handle);
 
         info!(
             multiaddr = %multiaddr,
             host = %host, port = %port, domain = %domain,
-            "new peer added"
+            "known peers added"
         );
 
         Ok(Response::new(StatusCode { code: 0 }))
@@ -543,8 +548,8 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         _request: Request<Empty>,
     ) -> Result<Response<TotalNodeNetInfo>, tonic::Status> {
         let mut node_infos: Vec<NodeNetInfo> = vec![];
-        let peers = self.peers.read();
-        for (domain, p) in peers.get_connected_peers().iter() {
+        let guard = self.peers.read();
+        for (domain, p) in guard.get_connected_peers().iter() {
             let multiaddr = build_multiaddr(p.host(), p.port(), domain);
             node_infos.push(NodeNetInfo {
                 multi_address: multiaddr.to_string(),
@@ -660,30 +665,40 @@ async fn try_hot_update(path: &str, network_svc_hot_update: &CitaCloudNetworkSer
         warn!("load config file: ({}) failed, check format", path);
         return;
     };
-    let old_peers = network_svc_hot_update
+    let known_peers = network_svc_hot_update
         .peers
         .read()
+        .get_known_peers()
         .iter()
         .map(|(s, _)| s.to_owned())
         .collect::<Vec<String>>();
-    info!("already connected peers: {:?}", old_peers);
+    info!("known peers: {:?}", known_peers);
+    let connected_peers = network_svc_hot_update
+        .peers
+        .read()
+        .get_connected_peers()
+        .iter()
+        .map(|(s, _)| s.to_owned())
+        .collect::<Vec<String>>();
+    info!("connected peers: {:?}", connected_peers);
     let new_peers = new_config
         .peers
         .iter()
         .map(|p| p.domain.to_owned())
         .collect::<Vec<String>>();
     info!("peers in config file: {:?}", new_peers);
+    //try to add node
     for p in new_config.peers {
-        if !network_svc_hot_update.peers.read().contains_key(&p.domain) {
+        if !known_peers.contains(&p.domain) {
             let multiaddr = build_multiaddr(&p.host, p.port, &p.domain);
             info!(
                 multiaddr = %multiaddr,
                 host = %p.host, port = %p.port, domain = %p.domain,
                 "attempt to hot update new peer"
             );
-            let mut peers = network_svc_hot_update.peers.write();
+
             let (peer, handle) = Peer::new(
-                peers.len() as u64 + 1,
+                calculate_hash(&format!("{}:{}", &p.host, p.port)),
                 p.domain.clone(),
                 p.host.clone(),
                 p.port,
@@ -692,15 +707,23 @@ async fn try_hot_update(path: &str, network_svc_hot_update: &CitaCloudNetworkSer
                 network_svc_hot_update.inbound_msg_tx.clone(),
             );
 
+            let mut guard = network_svc_hot_update.peers.write();
+            guard.add_known_peers(p.domain.clone(), handle);
             tokio::spawn(async move { peer.run().await });
-
-            peers.insert(p.domain.clone(), handle);
 
             info!(
                 multiaddr = %multiaddr,
                 host = %p.host, port = %p.port, domain = %p.domain,
-                "new peer added"
+                "known peers added"
             );
+        }
+    }
+    //try to delete node
+    for p in connected_peers {
+        if !new_peers.contains(&p) {
+            let mut guard = network_svc_hot_update.peers.write();
+            guard.delete_peer(p.as_str());
+            info!("delete peer: {}", p);
         }
     }
 }
