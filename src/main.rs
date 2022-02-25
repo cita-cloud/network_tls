@@ -20,8 +20,7 @@ mod server;
 
 use std::path::PathBuf;
 
-use clap::Arg;
-use clap::Command;
+use clap::{Arg, Command};
 
 use crate::config::load_config;
 use crate::server::Server;
