@@ -32,6 +32,8 @@ fn main() {
         .about("run network service")
         .arg(
             Arg::new("config")
+                .short('c')
+                .long("config")
                 .help("the network config")
                 .takes_value(true)
                 .validator(|s| s.parse::<PathBuf>())
