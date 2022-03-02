@@ -20,8 +20,7 @@ mod server;
 
 use std::path::PathBuf;
 
-use clap::Arg;
-use clap::Command;
+use clap::{Arg, Command};
 
 use crate::config::load_config;
 use crate::server::Server;
@@ -32,6 +31,8 @@ fn main() {
         .about("run network service")
         .arg(
             Arg::new("config")
+                .short('c')
+                .long("config")
                 .help("the network config")
                 .takes_value(true)
                 .validator(|s| s.parse::<PathBuf>())
