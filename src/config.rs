@@ -25,8 +25,14 @@ use rcgen::PKCS_ECDSA_P256_SHA256;
 
 use serde::{Deserialize, Serialize};
 
+use md5::{compute, Digest};
+
 fn default_reconnect_timeout() -> u64 {
     5
+}
+
+fn default_try_hot_update_interval() -> u64 {
+    60
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -45,6 +51,9 @@ pub struct NetworkConfig {
 
     #[serde(default = "default_reconnect_timeout")]
     pub reconnect_timeout: u64, // in seconds
+
+    #[serde(default = "default_try_hot_update_interval")]
+    pub try_hot_update_interval: u64, // in seconds
 
     pub ca_cert: String,
 
@@ -120,6 +129,7 @@ pub fn generate_config(peer_count: usize) {
                 grpc_port: (50000 + i * 1000) as u16,
                 listen_port: this.port,
                 reconnect_timeout: default_reconnect_timeout(),
+                try_hot_update_interval: default_try_hot_update_interval(),
                 ca_cert: ca_cert_pem.clone(),
                 cert,
                 priv_key,
@@ -135,14 +145,31 @@ pub fn generate_config(peer_count: usize) {
     });
 }
 
-pub fn load_config(path: impl AsRef<Path>) -> NetworkConfig {
-    let s = {
-        let mut f = File::open(path).unwrap();
+pub fn load_config(path: impl AsRef<Path>) -> Result<NetworkConfig, ()> {
+    let s = if let Ok(mut f) = File::open(path) {
         let mut buf = String::new();
         f.read_to_string(&mut buf).unwrap();
         buf
+    } else {
+        return Err(());
     };
+    if let Ok(config) = toml::from_str(&s) {
+        let c: Config = config;
+        Ok(c.network)
+    } else {
+        Err(())
+    }
+}
 
-    let config: Config = toml::from_str(&s).unwrap();
-    config.network
+pub fn calculate_md5(path: impl AsRef<Path>) -> Result<Digest, ()> {
+    let mut f = if let Ok(f) = File::open(path) {
+        f
+    } else {
+        return Err(());
+    };
+    let mut file = Vec::new();
+    if f.read_to_end(&mut file).is_err() {
+        return Err(());
+    }
+    Ok(compute(file))
 }

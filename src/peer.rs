@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
@@ -44,12 +45,70 @@ type ClientTlsStream = tokio_rustls::client::TlsStream<TcpStream>;
 type Framed = tokio_util::codec::Framed<TlsStream, Codec>;
 
 #[derive(Debug, Clone)]
+pub struct PeersManger {
+    known_peers: HashMap<String, PeerHandle>,
+    connected_peers: HashMap<String, PeerHandle>,
+}
+
+impl PeersManger {
+    pub fn new(known_peers: HashMap<String, PeerHandle>) -> Self {
+        Self {
+            known_peers,
+            connected_peers: HashMap::new(),
+        }
+    }
+
+    pub fn get_known_peers(&self) -> &HashMap<String, PeerHandle> {
+        &self.known_peers
+    }
+
+    pub fn add_known_peers(
+        &mut self,
+        domain: String,
+        peer_handle: PeerHandle,
+    ) -> Option<PeerHandle> {
+        debug!("add_from_config_peers: {}", domain);
+        self.known_peers.insert(domain, peer_handle)
+    }
+
+    pub fn get_connected_peers(&self) -> &HashMap<String, PeerHandle> {
+        &self.connected_peers
+    }
+
+    pub fn add_connected_peers(&mut self, domain: &str) -> Option<PeerHandle> {
+        debug!("add_connected_peers: {}", domain);
+        self.connected_peers.insert(
+            domain.to_owned(),
+            self.get_known_peers().get(domain).unwrap().clone(),
+        )
+    }
+
+    fn delete_connected_peers(&mut self, domain: &str) {
+        if let Some(peer_handle) = self.connected_peers.get(domain) {
+            debug!("delete_connected_peers: {}", domain);
+            peer_handle.join_handle.abort();
+            self.connected_peers.remove(domain);
+        }
+    }
+
+    pub fn delete_peer(&mut self, domain: &str) {
+        if self.known_peers.get(domain).is_some() {
+            debug!("delete_peer: {}", domain);
+            self.known_peers.remove(domain);
+            self.delete_connected_peers(domain);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct PeerHandle {
     id: u64,
     host: String,
     port: u16,
     inbound_stream_tx: mpsc::Sender<ServerTlsStream>,
     outbound_msg_tx: mpsc::Sender<NetworkMsg>,
+    // run handle
+    join_handle: Arc<JoinHandle<()>>,
 }
 
 impl PeerHandle {
@@ -99,7 +158,7 @@ pub struct Peer {
 }
 
 impl Peer {
-    pub fn new(
+    pub fn init(
         id: u64,
         domain: String,
         host: String,
@@ -107,7 +166,7 @@ impl Peer {
         tls_config: Arc<ClientConfig>,
         reconnect_timeout: u64,
         inbound_msg_tx: mpsc::Sender<NetworkMsg>,
-    ) -> (Peer, PeerHandle) {
+    ) -> PeerHandle {
         let (inbound_stream_tx, inbound_stream_rx) = mpsc::channel(1);
         let (outbound_msg_tx, outbound_msg_rx) = mpsc::channel(1024);
 
@@ -123,15 +182,18 @@ impl Peer {
             inbound_stream_rx,
         };
 
-        let handle = PeerHandle {
+        let join_handle = Arc::new(tokio::spawn(async move {
+            peer.run().await;
+        }));
+
+        PeerHandle {
             id,
             host,
             port,
             inbound_stream_tx,
             outbound_msg_tx,
-        };
-
-        (peer, handle)
+            join_handle,
+        }
     }
 
     pub async fn run(mut self) {
