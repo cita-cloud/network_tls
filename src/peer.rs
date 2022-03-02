@@ -83,15 +83,14 @@ impl PeersManger {
         )
     }
 
-    pub fn delete_connected_peers(&mut self, domain: &str) {
+    fn delete_connected_peers(&mut self, domain: &str) {
         if let Some(peer_handle) = self.connected_peers.get(domain) {
             debug!("delete_connected_peers: {}", domain);
-            peer_handle.handle.abort();
+            peer_handle.join_handle.abort();
             self.connected_peers.remove(domain);
         }
     }
 
-    #[allow(dead_code)]
     pub fn delete_peer(&mut self, domain: &str) {
         if self.known_peers.get(domain).is_some() {
             debug!("delete_peer: {}", domain);
@@ -109,7 +108,7 @@ pub struct PeerHandle {
     inbound_stream_tx: mpsc::Sender<ServerTlsStream>,
     outbound_msg_tx: mpsc::Sender<NetworkMsg>,
     // run handle
-    handle: Arc<JoinHandle<()>>,
+    join_handle: Arc<JoinHandle<()>>,
 }
 
 impl PeerHandle {
@@ -183,7 +182,7 @@ impl Peer {
             inbound_stream_rx,
         };
 
-        let handle = Arc::new(tokio::spawn(async move {
+        let join_handle = Arc::new(tokio::spawn(async move {
             peer.run().await;
         }));
 
@@ -193,7 +192,7 @@ impl Peer {
             port,
             inbound_stream_tx,
             outbound_msg_tx,
-            handle,
+            join_handle,
         }
     }
 

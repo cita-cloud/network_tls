@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::SystemTime;
 
-use tracing::{error, info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use parking_lot::RwLock;
 
@@ -252,7 +252,6 @@ impl Server {
         let peers = {
             for c in config.peers.into_iter() {
                 let handle = Peer::init(
-                    // start from 1
                     calculate_hash(&format!("{}:{}", &c.host, c.port)),
                     c.domain.clone(),
                     c.host,
@@ -389,11 +388,11 @@ impl Server {
                 let guard = peers.read();
                 if let Some(peer) = dns_s
                     .iter()
-                    .find_map(|dns| guard.get_known_peers().get(dns))
+                    .find_map(|dns| guard.get_connected_peers().get(dns))
                 {
                     peer.accept(stream);
                 } else {
-                    error!(
+                    debug!(
                         peers = ?&*guard,
                         cert.dns = ?dns_s,
                         "no peer instance for this connection"
@@ -518,7 +517,7 @@ impl NetworkService for CitaCloudNetworkServiceServer {
             return Ok(Response::new(StatusCode { code: 405 }));
         }
         if guard.get_known_peers().contains_key(&domain) {
-            //add a known peer which is already trying to connect
+            //add a known peer which is already trying to connect, return success
             return Ok(Response::new(StatusCode { code: 0 }));
         }
 
@@ -697,7 +696,7 @@ async fn try_hot_update(path: &str, network_svc_hot_update: &CitaCloudNetworkSer
                 "attempt to hot update new peer"
             );
 
-            let (peer, handle) = Peer::new(
+            let handle = Peer::init(
                 calculate_hash(&format!("{}:{}", &p.host, p.port)),
                 p.domain.clone(),
                 p.host.clone(),
@@ -709,7 +708,6 @@ async fn try_hot_update(path: &str, network_svc_hot_update: &CitaCloudNetworkSer
 
             let mut guard = network_svc_hot_update.peers.write();
             guard.add_known_peers(p.domain.clone(), handle);
-            tokio::spawn(async move { peer.run().await });
 
             info!(
                 multiaddr = %multiaddr,
@@ -719,7 +717,7 @@ async fn try_hot_update(path: &str, network_svc_hot_update: &CitaCloudNetworkSer
         }
     }
     //try to delete node
-    for p in connected_peers {
+    for p in known_peers {
         if !new_peers.contains(&p) {
             let mut guard = network_svc_hot_update.peers.write();
             guard.delete_peer(p.as_str());

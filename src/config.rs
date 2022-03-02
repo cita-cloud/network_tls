@@ -167,14 +167,9 @@ pub fn calculate_md5(path: impl AsRef<Path>) -> Result<Digest, ()> {
     } else {
         return Err(());
     };
-    let mut buffer = [0; 1024];
-    let mut file = vec![];
-    while let Ok(len) = f.read(&mut buffer) {
-        if len == 0 {
-            break;
-        } else {
-            file.append(&mut buffer[..len].to_vec());
-        }
+    let mut file = Vec::new();
+    if f.read_to_end(&mut file).is_err() {
+        return Err(());
     }
     Ok(compute(file))
 }
