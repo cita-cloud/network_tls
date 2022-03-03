@@ -14,6 +14,7 @@
 
 mod codec;
 mod config;
+mod error;
 mod peer;
 mod proto;
 mod server;
