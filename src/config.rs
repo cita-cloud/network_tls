@@ -37,7 +37,7 @@ fn default_try_hot_update_interval() -> u64 {
     60
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct PeerConfig {
     pub host: String,
     pub port: u16,
@@ -46,7 +46,7 @@ pub struct PeerConfig {
     pub domain: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize)]
 pub struct NetworkConfig {
     pub grpc_port: u16,
     pub listen_port: u16,
@@ -70,7 +70,7 @@ pub struct NetworkConfig {
 }
 
 // a wrapper
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize)]
 struct Config {
     #[serde(rename = "network_tls")]
     network: NetworkConfig,

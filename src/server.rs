@@ -113,7 +113,7 @@ fn prepare<'a, 'b>(
     Ok((cert, chain, trustroots))
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct AllowKnownPeerOnly {
     roots: RootCertStore,
     peers: Arc<RwLock<PeersManger>>,
@@ -384,7 +384,7 @@ impl Server {
                 let guard = peers.read();
                 if let Some(peer) = dns_s
                     .iter()
-                    .find_map(|dns| guard.get_connected_peers().get(dns))
+                    .find_map(|dns| guard.get_known_peers().get(dns))
                 {
                     peer.accept(stream);
                 } else {
@@ -423,7 +423,7 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         let guard = self.peers.read();
 
         if let Some(peer) = guard
-            .get_connected_peers()
+            .get_known_peers()
             .values()
             .find(|peer| peer.id() == origin)
         {
@@ -431,8 +431,12 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         } else {
             // TODO: check if it's necessary
             // fallback to broadcast
-            for peer in guard.get_connected_peers().values() {
-                peer.send_msg(msg.clone());
+            for domain in guard.get_connected_peers().iter() {
+                guard
+                    .get_known_peers()
+                    .get(domain)
+                    .unwrap()
+                    .send_msg(msg.clone());
             }
         }
 
@@ -449,8 +453,12 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         msg.origin = 0;
         let guard = self.peers.read();
 
-        for peer in guard.get_connected_peers().values() {
-            peer.send_msg(msg.clone());
+        for domain in guard.get_connected_peers().iter() {
+            guard
+                .get_known_peers()
+                .get(domain)
+                .unwrap()
+                .send_msg(msg.clone());
         }
 
         let ok = StatusCode { code: 0 };
@@ -508,7 +516,7 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         );
 
         let mut guard = self.peers.write();
-        if guard.get_connected_peers().contains_key(&domain) {
+        if guard.get_connected_peers().contains(&domain) {
             //add a connected peer
             return Ok(Response::new(StatusCode { code: 405 }));
         }
@@ -544,11 +552,12 @@ impl NetworkService for CitaCloudNetworkServiceServer {
     ) -> Result<Response<TotalNodeNetInfo>, tonic::Status> {
         let mut node_infos: Vec<NodeNetInfo> = vec![];
         let guard = self.peers.read();
-        for (domain, p) in guard.get_connected_peers().iter() {
-            let multiaddr = build_multiaddr(p.host(), p.port(), domain);
+        for domain in guard.get_connected_peers().iter() {
+            let peer = guard.get_known_peers().get(domain).unwrap();
+            let multiaddr = build_multiaddr(peer.host(), peer.port(), domain);
             node_infos.push(NodeNetInfo {
                 multi_address: multiaddr.to_string(),
-                origin: p.id(),
+                origin: peer.id(),
             });
         }
 
