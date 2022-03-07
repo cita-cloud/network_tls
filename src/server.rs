@@ -113,7 +113,7 @@ fn prepare<'a, 'b>(
     Ok((cert, chain, trustroots))
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct AllowKnownPeerOnly {
     roots: RootCertStore,
     peers: Arc<RwLock<PeersManger>>,
@@ -294,34 +294,30 @@ impl Server {
 
         //hot update
         let network_svc_hot_update = network_svc.clone();
-        let try_hot_update_interval = config.try_hot_update_interval;
+        let mut try_hot_update_interval =
+            tokio::time::interval(Duration::from_secs(config.try_hot_update_interval));
         tokio::spawn(async move {
             info!("monitoring config file: ({})", &path[..]);
-            let mut md5 = if let Ok(md5) = calculate_md5(&path) {
-                md5
+            if let Ok(mut md5) = calculate_md5(&path) {
+                info!("config file initial md5: {:x}", md5);
+                loop {
+                    try_hot_update_interval.tick().await;
+                    if let Ok(new_md5) = calculate_md5(&path) {
+                        if new_md5 == md5 {
+                            continue;
+                        } else {
+                            info!("config file new md5: {:x}", new_md5);
+                            md5 = new_md5;
+                            try_hot_update(&path, &network_svc_hot_update).await;
+                        }
+                    } else {
+                        warn!("calculate config file md5 failed, make sure it's not removed");
+                        continue;
+                    };
+                }
             } else {
                 warn!("calculate config file md5 failed, hot update invalid");
-                return;
             };
-            info!("config file original md5: {:x}", md5);
-            let mut try_hot_update_interval =
-                tokio::time::interval(Duration::from_secs(try_hot_update_interval));
-            loop {
-                try_hot_update_interval.tick().await;
-                let new_md5 = if let Ok(new_md5) = calculate_md5(&path) {
-                    new_md5
-                } else {
-                    warn!("calculate config file md5 failed, make sure not removed");
-                    continue;
-                };
-                if new_md5 == md5 {
-                    continue;
-                } else {
-                    info!("config file new md5: {:x}", new_md5);
-                    md5 = new_md5;
-                    try_hot_update(&path, &network_svc_hot_update).await;
-                }
-            }
         });
 
         let grpc_addr = format!("0.0.0.0:{}", config.grpc_port).parse().unwrap();
@@ -388,7 +384,7 @@ impl Server {
                 let guard = peers.read();
                 if let Some(peer) = dns_s
                     .iter()
-                    .find_map(|dns| guard.get_connected_peers().get(dns))
+                    .find_map(|dns| guard.get_known_peers().get(dns))
                 {
                     peer.accept(stream);
                 } else {
@@ -427,7 +423,7 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         let guard = self.peers.read();
 
         if let Some(peer) = guard
-            .get_connected_peers()
+            .get_known_peers()
             .values()
             .find(|peer| peer.id() == origin)
         {
@@ -435,8 +431,12 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         } else {
             // TODO: check if it's necessary
             // fallback to broadcast
-            for peer in guard.get_connected_peers().values() {
-                peer.send_msg(msg.clone());
+            for domain in guard.get_connected_peers().iter() {
+                guard
+                    .get_known_peers()
+                    .get(domain)
+                    .unwrap()
+                    .send_msg(msg.clone());
             }
         }
 
@@ -453,8 +453,12 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         msg.origin = 0;
         let guard = self.peers.read();
 
-        for peer in guard.get_connected_peers().values() {
-            peer.send_msg(msg.clone());
+        for domain in guard.get_connected_peers().iter() {
+            guard
+                .get_known_peers()
+                .get(domain)
+                .unwrap()
+                .send_msg(msg.clone());
         }
 
         let ok = StatusCode { code: 0 };
@@ -512,7 +516,7 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         );
 
         let mut guard = self.peers.write();
-        if guard.get_connected_peers().contains_key(&domain) {
+        if guard.get_connected_peers().contains(&domain) {
             //add a connected peer
             return Ok(Response::new(StatusCode { code: 405 }));
         }
@@ -536,7 +540,7 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         info!(
             multiaddr = %multiaddr,
             host = %host, port = %port, domain = %domain,
-            "known peers added"
+            "peer added: "
         );
 
         Ok(Response::new(StatusCode { code: 0 }))
@@ -548,11 +552,12 @@ impl NetworkService for CitaCloudNetworkServiceServer {
     ) -> Result<Response<TotalNodeNetInfo>, tonic::Status> {
         let mut node_infos: Vec<NodeNetInfo> = vec![];
         let guard = self.peers.read();
-        for (domain, p) in guard.get_connected_peers().iter() {
-            let multiaddr = build_multiaddr(p.host(), p.port(), domain);
+        for domain in guard.get_connected_peers().iter() {
+            let peer = guard.get_known_peers().get(domain).unwrap();
+            let multiaddr = build_multiaddr(peer.host(), peer.port(), domain);
             node_infos.push(NodeNetInfo {
                 multi_address: multiaddr.to_string(),
-                origin: p.id(),
+                origin: peer.id(),
             });
         }
 
@@ -658,72 +663,57 @@ fn calculate_hash<T: Hash>(t: &T) -> u64 {
 }
 
 async fn try_hot_update(path: &str, network_svc_hot_update: &CitaCloudNetworkServiceServer) {
-    let new_config = if let Ok(config) = load_config(path) {
-        config
+    if let Ok(new_config) = load_config(path) {
+        let known_peers = network_svc_hot_update
+            .peers
+            .read()
+            .get_known_peers()
+            .iter()
+            .map(|(s, _)| s.to_owned())
+            .collect::<Vec<String>>();
+        debug!("known peers: {:?}", known_peers);
+        let new_peers = new_config
+            .peers
+            .iter()
+            .map(|p| p.domain.to_owned())
+            .collect::<Vec<String>>();
+        debug!("peers in config file: {:?}", new_peers);
+        //try to add node
+        for p in new_config.peers {
+            if !known_peers.contains(&p.domain) {
+                let multiaddr = build_multiaddr(&p.host, p.port, &p.domain);
+
+                let handle = Peer::init(
+                    calculate_hash(&format!("{}:{}", &p.host, p.port)),
+                    p.domain.clone(),
+                    p.host.clone(),
+                    p.port,
+                    network_svc_hot_update.tls_config.clone(),
+                    network_svc_hot_update.reconnect_timeout,
+                    network_svc_hot_update.inbound_msg_tx.clone(),
+                );
+
+                let mut guard = network_svc_hot_update.peers.write();
+                guard.add_known_peers(p.domain.clone(), handle);
+
+                info!(
+                    multiaddr = %multiaddr,
+                    host = %p.host, port = %p.port, domain = %p.domain,
+                    "peer added: "
+                );
+            }
+        }
+        //try to delete node
+        for p in known_peers {
+            if !new_peers.contains(&p) {
+                let mut guard = network_svc_hot_update.peers.write();
+                guard.delete_peer(p.as_str());
+                info!("peer deleted: {}", p);
+            }
+        }
     } else {
         warn!("load config file: ({}) failed, check format", path);
-        return;
     };
-    let known_peers = network_svc_hot_update
-        .peers
-        .read()
-        .get_known_peers()
-        .iter()
-        .map(|(s, _)| s.to_owned())
-        .collect::<Vec<String>>();
-    info!("known peers: {:?}", known_peers);
-    let connected_peers = network_svc_hot_update
-        .peers
-        .read()
-        .get_connected_peers()
-        .iter()
-        .map(|(s, _)| s.to_owned())
-        .collect::<Vec<String>>();
-    info!("connected peers: {:?}", connected_peers);
-    let new_peers = new_config
-        .peers
-        .iter()
-        .map(|p| p.domain.to_owned())
-        .collect::<Vec<String>>();
-    info!("peers in config file: {:?}", new_peers);
-    //try to add node
-    for p in new_config.peers {
-        if !known_peers.contains(&p.domain) {
-            let multiaddr = build_multiaddr(&p.host, p.port, &p.domain);
-            info!(
-                multiaddr = %multiaddr,
-                host = %p.host, port = %p.port, domain = %p.domain,
-                "attempt to hot update new peer"
-            );
-
-            let handle = Peer::init(
-                calculate_hash(&format!("{}:{}", &p.host, p.port)),
-                p.domain.clone(),
-                p.host.clone(),
-                p.port,
-                network_svc_hot_update.tls_config.clone(),
-                network_svc_hot_update.reconnect_timeout,
-                network_svc_hot_update.inbound_msg_tx.clone(),
-            );
-
-            let mut guard = network_svc_hot_update.peers.write();
-            guard.add_known_peers(p.domain.clone(), handle);
-
-            info!(
-                multiaddr = %multiaddr,
-                host = %p.host, port = %p.port, domain = %p.domain,
-                "known peers added"
-            );
-        }
-    }
-    //try to delete node
-    for p in known_peers {
-        if !new_peers.contains(&p) {
-            let mut guard = network_svc_hot_update.peers.write();
-            guard.delete_peer(p.as_str());
-            info!("delete peer: {}", p);
-        }
-    }
 }
 
 #[cfg(test)]

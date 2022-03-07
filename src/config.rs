@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fs::File;
+use crate::error::Error;
+
+use std::fs;
 use std::io::prelude::*;
 use std::path::Path;
 
@@ -35,7 +37,7 @@ fn default_try_hot_update_interval() -> u64 {
     60
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct PeerConfig {
     pub host: String,
     pub port: u16,
@@ -44,7 +46,7 @@ pub struct PeerConfig {
     pub domain: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize)]
 pub struct NetworkConfig {
     pub grpc_port: u16,
     pub listen_port: u16,
@@ -68,7 +70,7 @@ pub struct NetworkConfig {
 }
 
 // a wrapper
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize)]
 struct Config {
     #[serde(rename = "network_tls")]
     network: NetworkConfig,
@@ -103,7 +105,7 @@ fn cert(domain: &str, signer: &Certificate) -> (Certificate, String, String) {
 pub fn generate_config(peer_count: usize) {
     let (ca_cert, ca_cert_pem, ca_key_pem) = ca_cert();
 
-    let mut f = File::create("ca_key.pem").unwrap();
+    let mut f = fs::File::create("ca_key.pem").unwrap();
     f.write_all(ca_key_pem.as_bytes()).unwrap();
 
     let peers: Vec<PeerConfig> = (0..peer_count)
@@ -139,37 +141,29 @@ pub fn generate_config(peer_count: usize) {
         };
 
         let path = format!("peer{}.toml", i);
-        let mut f = File::create(&path).unwrap();
+        let mut f = fs::File::create(&path).unwrap();
         f.write_all(toml::to_string_pretty(&config).unwrap().as_bytes())
             .unwrap();
     });
 }
 
-pub fn load_config(path: impl AsRef<Path>) -> Result<NetworkConfig, ()> {
-    let s = if let Ok(mut f) = File::open(path) {
-        let mut buf = String::new();
-        f.read_to_string(&mut buf).unwrap();
-        buf
+pub fn load_config(path: impl AsRef<Path>) -> Result<NetworkConfig, Error> {
+    if let Ok(s) = fs::read_to_string(path) {
+        if let Ok(config) = toml::from_str(&s) {
+            let c: Config = config;
+            Ok(c.network)
+        } else {
+            Err(Error::ParseTomlFail)
+        }
     } else {
-        return Err(());
-    };
-    if let Ok(config) = toml::from_str(&s) {
-        let c: Config = config;
-        Ok(c.network)
-    } else {
-        Err(())
+        Err(Error::FileNotExist)
     }
 }
 
-pub fn calculate_md5(path: impl AsRef<Path>) -> Result<Digest, ()> {
-    let mut f = if let Ok(f) = File::open(path) {
-        f
+pub fn calculate_md5(path: impl AsRef<Path>) -> Result<Digest, Error> {
+    if let Ok(s) = fs::read_to_string(path) {
+        Ok(compute(s))
     } else {
-        return Err(());
-    };
-    let mut file = Vec::new();
-    if f.read_to_end(&mut file).is_err() {
-        return Err(());
+        Err(Error::FileNotExist)
     }
-    Ok(compute(file))
 }

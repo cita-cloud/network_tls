@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
@@ -44,17 +44,17 @@ type ClientTlsStream = tokio_rustls::client::TlsStream<TcpStream>;
 
 type Framed = tokio_util::codec::Framed<TlsStream, Codec>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PeersManger {
     known_peers: HashMap<String, PeerHandle>,
-    connected_peers: HashMap<String, PeerHandle>,
+    connected_peers: HashSet<String>,
 }
 
 impl PeersManger {
     pub fn new(known_peers: HashMap<String, PeerHandle>) -> Self {
         Self {
             known_peers,
-            connected_peers: HashMap::new(),
+            connected_peers: HashSet::new(),
         }
     }
 
@@ -71,29 +71,26 @@ impl PeersManger {
         self.known_peers.insert(domain, peer_handle)
     }
 
-    pub fn get_connected_peers(&self) -> &HashMap<String, PeerHandle> {
+    pub fn get_connected_peers(&self) -> &HashSet<String> {
         &self.connected_peers
     }
 
-    pub fn add_connected_peers(&mut self, domain: &str) -> Option<PeerHandle> {
+    pub fn add_connected_peers(&mut self, domain: &str) -> bool {
         debug!("add_connected_peers: {}", domain);
-        self.connected_peers.insert(
-            domain.to_owned(),
-            self.get_known_peers().get(domain).unwrap().clone(),
-        )
+        self.connected_peers.insert(domain.to_owned())
     }
 
     fn delete_connected_peers(&mut self, domain: &str) {
-        if let Some(peer_handle) = self.connected_peers.get(domain) {
+        if self.connected_peers.get(domain).is_some() {
             debug!("delete_connected_peers: {}", domain);
-            peer_handle.join_handle.abort();
             self.connected_peers.remove(domain);
         }
     }
 
     pub fn delete_peer(&mut self, domain: &str) {
-        if self.known_peers.get(domain).is_some() {
+        if let Some(peer_handle) = self.known_peers.get(domain) {
             debug!("delete_peer: {}", domain);
+            peer_handle.join_handle.abort();
             self.known_peers.remove(domain);
             self.delete_connected_peers(domain);
         }
