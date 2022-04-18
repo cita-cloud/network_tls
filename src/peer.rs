@@ -36,7 +36,7 @@ use tracing::{debug, info, warn};
 
 use crate::codec::Codec;
 use crate::codec::DecodeError;
-use crate::proto::NetworkMsg;
+use cita_cloud_proto::network::NetworkMsg;
 
 type TlsStream = tokio_rustls::TlsStream<TcpStream>;
 type ServerTlsStream = tokio_rustls::server::TlsStream<TcpStream>;

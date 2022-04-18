@@ -45,14 +45,19 @@ use x509_parser::traits::FromDer;
 use tentacle_multiaddr::MultiAddr;
 use tentacle_multiaddr::Protocol;
 
+use cita_cloud_proto::common::{Empty, NodeNetInfo, StatusCode, TotalNodeNetInfo};
+
+use crate::health_check::HealthCheckServer;
 use crate::peer::PeersManger;
 use crate::{
     config::{calculate_md5, load_config, NetworkConfig},
     peer::Peer,
-    proto::{
-        Empty, NetworkMsg, NetworkMsgHandlerServiceClient, NetworkService, NetworkServiceServer,
-        NetworkStatusResponse, NodeNetInfo, RegisterInfo, StatusCode, TotalNodeNetInfo,
-    },
+};
+use cita_cloud_proto::health_check::health_server::HealthServer;
+use cita_cloud_proto::network::{
+    network_msg_handler_service_client::NetworkMsgHandlerServiceClient,
+    network_service_server::{NetworkService, NetworkServiceServer},
+    NetworkMsg, NetworkStatusResponse, RegisterInfo,
 };
 
 type SignatureAlgorithms = &'static [&'static webpki::SignatureAlgorithm];
@@ -324,6 +329,7 @@ impl Server {
         tokio::spawn(async move {
             tonic::transport::Server::builder()
                 .add_service(NetworkServiceServer::new(network_svc))
+                .add_service(HealthServer::new(HealthCheckServer {}))
                 .serve(grpc_addr)
                 .await
                 .unwrap();
