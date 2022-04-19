@@ -12,15 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("cargo:rerun-if-changed=proto");
-    tonic_build::configure()
-        .build_client(true)
-        .build_server(true)
-        .format(true)
-        .compile(
-            &["blockchain.proto", "common.proto", "network.proto"],
-            &["proto"],
-        )?;
-    Ok(())
+use cita_cloud_proto::health_check::{
+    health_check_response::ServingStatus, health_server::Health, HealthCheckRequest,
+    HealthCheckResponse,
+};
+use tonic::{Request, Response, Status};
+
+// grpc server of Health Check
+pub struct HealthCheckServer;
+
+#[tonic::async_trait]
+impl Health for HealthCheckServer {
+    async fn check(
+        &self,
+        _request: Request<HealthCheckRequest>,
+    ) -> Result<Response<HealthCheckResponse>, Status> {
+        let reply = Response::new(HealthCheckResponse {
+            status: ServingStatus::Serving.into(),
+        });
+        Ok(reply)
+    }
 }

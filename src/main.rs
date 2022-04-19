@@ -15,8 +15,8 @@
 mod codec;
 mod config;
 mod error;
+mod health_check;
 mod peer;
-mod proto;
 mod server;
 
 use std::path::PathBuf;

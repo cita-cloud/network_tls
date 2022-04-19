@@ -19,7 +19,7 @@ use prost::Message;
 
 use tokio_util::codec::{Decoder, Encoder};
 
-use crate::proto::NetworkMsg;
+use cita_cloud_proto::network::NetworkMsg;
 
 // MAX_FRAME_LEN must be the same on all peers.
 // Sending a msg larger than the targeting peer's MAX_FRAME_LEN will be rejected.
