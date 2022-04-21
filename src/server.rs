@@ -12,53 +12,48 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{hash_map::DefaultHasher, HashMap};
-use std::hash::{Hash, Hasher};
-use std::io::BufReader;
-use std::sync::Arc;
-use std::time::Duration;
-use std::time::SystemTime;
-
-use tracing::{debug, info, trace, warn};
-
-use parking_lot::RwLock;
-
-use tokio::net::TcpListener;
-use tokio::sync::mpsc;
-use tokio_rustls::{
-    rustls::{
-        internal::pemfile, Certificate, ClientCertVerified, ClientCertVerifier, ClientConfig,
-        DistinguishedNames, OwnedTrustAnchor, RootCertStore, ServerCertVerified,
-        ServerCertVerifier, ServerConfig, Session, TLSError,
-    },
-    webpki::{self, DNSNameRef, Time},
-    TlsAcceptor,
-};
-
-use tonic::transport::{Channel, Endpoint};
-use tonic::{Request, Response};
-
-use x509_parser::extensions::GeneralName;
-use x509_parser::prelude::X509Certificate;
-use x509_parser::traits::FromDer;
-
-use tentacle_multiaddr::MultiAddr;
-use tentacle_multiaddr::Protocol;
-
-use cita_cloud_proto::common::{Empty, NodeNetInfo, StatusCode, TotalNodeNetInfo};
-
+use crate::anchor::RootCertStore;
 use crate::health_check::HealthCheckServer;
 use crate::peer::PeersManger;
+use crate::util::{load_certs, make_client_config, make_server_config, pki_error};
 use crate::{
     config::{calculate_md5, load_config, NetworkConfig},
     peer::Peer,
 };
+use cita_cloud_proto::common::{Empty, NodeNetInfo, StatusCode, TotalNodeNetInfo};
 use cita_cloud_proto::health_check::health_server::HealthServer;
 use cita_cloud_proto::network::{
     network_msg_handler_service_client::NetworkMsgHandlerServiceClient,
     network_service_server::{NetworkService, NetworkServiceServer},
     NetworkMsg, NetworkStatusResponse, RegisterInfo,
 };
+use parking_lot::RwLock;
+use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+use std::time::Duration;
+use std::time::SystemTime;
+use tentacle_multiaddr::MultiAddr;
+use tentacle_multiaddr::Protocol;
+use tokio::net::TcpListener;
+use tokio::sync::mpsc;
+use tokio_rustls::rustls::client::{ServerCertVerified, ServerCertVerifier};
+use tokio_rustls::rustls::server::{ClientCertVerified, ClientCertVerifier};
+use tokio_rustls::rustls::ServerName;
+use tokio_rustls::webpki::{
+    self, DnsNameRef, EndEntityCert, Time, TlsClientTrustAnchors, TlsServerTrustAnchors,
+    TrustAnchor,
+};
+use tokio_rustls::{
+    rustls::{Certificate, ClientConfig, DistinguishedNames, Error as TlsError},
+    TlsAcceptor,
+};
+use tonic::transport::{Channel, Endpoint};
+use tonic::{Request, Response};
+use tracing::{debug, info, trace, warn};
+use x509_parser::extensions::GeneralName;
+use x509_parser::prelude::X509Certificate;
+use x509_parser::traits::FromDer;
 
 type SignatureAlgorithms = &'static [&'static webpki::SignatureAlgorithm];
 
@@ -81,47 +76,42 @@ static SUPPORTED_SIG_ALGS: SignatureAlgorithms = &[
     &webpki::RSA_PKCS1_3072_8192_SHA384,
 ];
 
-type CertChainAndRoots<'a, 'b> = (
-    webpki::EndEntityCert<'a>,
-    Vec<&'a [u8]>,
-    Vec<webpki::TrustAnchor<'b>>,
-);
-
-fn try_now() -> Result<webpki::Time, TLSError> {
-    webpki::Time::try_from(std::time::SystemTime::now())
-        .map_err(|_| TLSError::FailedToGetCurrentTime)
-}
+type CertChainAndRoots<'a, 'b> = (EndEntityCert<'a>, Vec<&'a [u8]>, Vec<TrustAnchor<'b>>);
 
 fn prepare<'a, 'b>(
+    end_entity: &'a Certificate,
+    intermediates: &'a [Certificate],
     roots: &'b RootCertStore,
-    presented_certs: &'a [Certificate],
-) -> Result<CertChainAndRoots<'a, 'b>, TLSError> {
-    if presented_certs.is_empty() {
-        return Err(TLSError::NoCertificatesPresented);
-    }
-
+) -> Result<CertChainAndRoots<'a, 'b>, TlsError> {
     // EE cert must appear first.
-    let cert = webpki::EndEntityCert::from(&presented_certs[0].0).map_err(TLSError::WebPKIError)?;
-
-    let chain: Vec<&'a [u8]> = presented_certs
-        .iter()
-        .skip(1)
-        .map(|cert| cert.0.as_ref())
-        .collect();
-
-    let trustroots: Vec<webpki::TrustAnchor> = roots
+    let cert = EndEntityCert::try_from(end_entity.0.as_slice()).map_err(pki_error)?;
+    let chain: Vec<&'a [u8]> = intermediates.iter().map(|cert| cert.0.as_ref()).collect();
+    let trust_roots = roots
         .roots
         .iter()
-        .map(OwnedTrustAnchor::to_trust_anchor)
+        .map(|cer| cer.to_trust_anchor())
         .collect();
 
-    Ok((cert, chain, trustroots))
+    Ok((cert, chain, trust_roots))
 }
 
 #[derive(Clone)]
-struct AllowKnownPeerOnly {
+pub struct AllowKnownPeerOnly {
     roots: RootCertStore,
     peers: Arc<RwLock<PeersManger>>,
+}
+
+impl AllowKnownPeerOnly {
+    pub fn new(trust_roots: Vec<Certificate>) -> Self {
+        let mut roots = RootCertStore::empty();
+        for cert in &trust_roots {
+            roots.add(cert).unwrap();
+        }
+        Self {
+            roots,
+            peers: Arc::new(RwLock::new(PeersManger::new(HashMap::new()))),
+        }
+    }
 }
 
 impl ClientCertVerifier for AllowKnownPeerOnly {
@@ -129,41 +119,39 @@ impl ClientCertVerifier for AllowKnownPeerOnly {
         true
     }
 
-    fn client_auth_mandatory(&self, _sni: Option<&webpki::DNSName>) -> Option<bool> {
+    fn client_auth_mandatory(&self) -> Option<bool> {
         Some(true)
     }
 
-    fn client_auth_root_subjects(
-        &self,
-        _sni: Option<&webpki::DNSName>,
-    ) -> Option<DistinguishedNames> {
-        Some(self.roots.get_subjects())
+    fn client_auth_root_subjects(&self) -> Option<DistinguishedNames> {
+        Some(self.roots.subjects())
     }
 
     fn verify_client_cert(
         &self,
-        presented_certs: &[Certificate],
-        _sni: Option<&webpki::DNSName>,
-    ) -> Result<ClientCertVerified, TLSError> {
-        let (cert, chain, trustroots) = prepare(&self.roots, presented_certs)?;
-        let now = try_now()?;
+        end_entity: &Certificate,
+        intermediates: &[Certificate],
+        now: SystemTime,
+    ) -> Result<ClientCertVerified, TlsError> {
+        let (cert, chain, trust_roots) = prepare(end_entity, intermediates, &self.roots)?;
+        let now = Time::try_from(now).map_err(|_| TlsError::FailedToGetCurrentTime)?;
         cert.verify_is_valid_tls_client_cert(
             SUPPORTED_SIG_ALGS,
-            &webpki::TLSClientTrustAnchors(&trustroots),
+            &TlsClientTrustAnchors(&trust_roots),
             &chain,
             now,
         )
-        .map_err(TLSError::WebPKIError)?;
+        .map_err(pki_error)?;
 
         let mut guard = self.peers.write();
         let known_peers = guard.get_known_peers().clone();
         let known = known_peers
             .keys()
-            .map(|k| DNSNameRef::try_from_ascii(k.as_bytes()).unwrap());
+            .map(|k| DnsNameRef::try_from_ascii(k.as_bytes()).unwrap());
 
         let valid_dns = cert
             .verify_is_valid_for_at_least_one_dns_name(known)
-            .map_err(TLSError::WebPKIError)?;
+            .map_err(pki_error)?;
 
         for vd in valid_dns {
             guard.add_connected_peers(vd.into());
@@ -181,33 +169,39 @@ impl ServerCertVerifier for AllowKnownPeerOnly {
     /// - OCSP data is present
     fn verify_server_cert(
         &self,
-        roots: &RootCertStore,
-        presented_certs: &[Certificate],
-        dns_name: webpki::DNSNameRef,
+        end_entity: &Certificate,
+        intermediates: &[Certificate],
+        server_name: &ServerName,
+        _scts: &mut dyn Iterator<Item = &[u8]>,
         ocsp_response: &[u8],
-    ) -> Result<ServerCertVerified, TLSError> {
-        let (cert, chain, trustroots) = prepare(roots, presented_certs)?;
-        let cert = cert
-            .verify_is_valid_tls_server_cert(
-                SUPPORTED_SIG_ALGS,
-                &webpki::TLSServerTrustAnchors(&trustroots),
-                &chain,
-                Time::try_from(SystemTime::now()).unwrap(),
-            )
-            .map_err(TLSError::WebPKIError)
-            .map(|_| cert)?;
+        now: SystemTime,
+    ) -> Result<ServerCertVerified, TlsError> {
+        let (cert, chain, trust_roots) = prepare(end_entity, intermediates, &self.roots)?;
+        let now = Time::try_from(now).map_err(|_| TlsError::FailedToGetCurrentTime)?;
+        cert.verify_is_valid_tls_server_cert(
+            SUPPORTED_SIG_ALGS,
+            &TlsServerTrustAnchors(&trust_roots),
+            &chain,
+            now,
+        )
+        .map_err(pki_error)?;
 
         if !ocsp_response.is_empty() {
             trace!("Unvalidated OCSP response: {:?}", ocsp_response.to_vec());
         }
 
-        cert.verify_is_valid_for_dns_name(dns_name)
-            .map_err(TLSError::WebPKIError)?;
+        if let ServerName::DnsName(dns_name) = server_name {
+            cert.verify_is_valid_for_dns_name(
+                DnsNameRef::try_from_ascii_str(dns_name.as_ref()).unwrap(),
+            )
+            .map_err(pki_error)?;
 
-        let mut guard = self.peers.write();
-        guard.add_connected_peers(dns_name.into());
+            let mut guard = self.peers.write();
+            guard.add_connected_peers(dns_name.as_ref());
 
-        Ok(ServerCertVerified::assertion())
+            return Ok(ServerCertVerified::assertion());
+        }
+        Err(TlsError::UnsupportedNameType)
     }
 }
 
@@ -220,42 +214,13 @@ pub struct Server {
 
 impl Server {
     pub async fn setup(config: NetworkConfig, path: String) {
-        let certs = {
-            let mut rd = BufReader::new(config.cert.as_bytes());
-            pemfile::certs(&mut rd).unwrap()
-        };
-        let priv_key = {
-            let mut rd = BufReader::new(config.priv_key.as_bytes());
-            pemfile::pkcs8_private_keys(&mut rd).unwrap().remove(0)
-        };
-
-        let roots = {
-            let mut rd = BufReader::new(config.ca_cert.as_bytes());
-            let mut roots = RootCertStore::empty();
-            roots.add_pem_file(&mut rd).unwrap();
-            roots
-        };
-
-        let verifier = AllowKnownPeerOnly {
-            roots: roots.clone(),
-            peers: Arc::new(RwLock::new(PeersManger::new(HashMap::new()))),
-        };
-
-        let client_config = {
-            let mut client_config = ClientConfig::new();
-            client_config.root_store = roots;
-            client_config
-                .set_single_client_cert(certs.clone(), priv_key.clone())
-                .unwrap();
-            client_config
-                .dangerous()
-                .set_certificate_verifier(Arc::new(verifier.clone()));
-            Arc::new(client_config)
-        };
+        let roots = load_certs(&config.ca_cert);
+        let verifier = AllowKnownPeerOnly::new(roots);
+        let client_config = Arc::new(make_client_config(&config, Arc::new(verifier.clone())));
 
         let (inbound_msg_tx, inbound_msg_rx) = mpsc::channel(1024);
         let peers = {
-            for c in config.peers.into_iter() {
+            for c in config.peers.clone().into_iter() {
                 let handle = Peer::init(
                     calculate_hash(&format!("{}:{}", &c.host, c.port)),
                     c.domain.clone(),
@@ -274,10 +239,8 @@ impl Server {
         };
 
         let tls_acceptor = {
-            let mut server_config = { ServerConfig::new(Arc::new(verifier)) };
-            server_config.set_single_cert(certs, priv_key).unwrap();
-
-            TlsAcceptor::from(Arc::new(server_config))
+            let server_config = Arc::new(make_server_config(&config, Arc::new(verifier)));
+            TlsAcceptor::from(server_config)
         };
 
         let dispatch_table = Arc::new(RwLock::new(HashMap::new()));
@@ -370,21 +333,25 @@ impl Server {
                         return;
                     }
                 };
-                let certs = stream.get_ref().1.get_peer_certificates().unwrap();
+                let certs = stream.get_ref().1.peer_certificates().unwrap();
                 let dns_s: Vec<String> = {
                     let cert = certs.first().unwrap();
                     let (_, parsed) = X509Certificate::from_der(cert.as_ref()).unwrap();
-                    let (_, san) = parsed.tbs_certificate.subject_alternative_name().unwrap();
-                    san.general_names
-                        .iter()
-                        .filter_map(|n| {
-                            if let GeneralName::DNSName(dns) = *n {
-                                Some(dns.to_owned())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect()
+                    if let Some(san) = parsed.tbs_certificate.subject_alternative_name().unwrap() {
+                        san.value
+                            .general_names
+                            .iter()
+                            .filter_map(|n| {
+                                if let GeneralName::DNSName(dns) = *n {
+                                    Some(dns.to_owned())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                    } else {
+                        vec![]
+                    }
                 };
 
                 let guard = peers.read();

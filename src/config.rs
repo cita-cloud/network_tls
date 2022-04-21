@@ -63,6 +63,9 @@ pub struct NetworkConfig {
     // TODO: better security
     pub priv_key: String,
 
+    pub(crate) protocols: Option<Vec<String>>,
+    pub(crate) cypher_suits: Option<Vec<String>>,
+
     #[serde(default)]
     // https://github.com/alexcrichton/toml-rs/issues/258
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -136,6 +139,8 @@ pub fn generate_config(peer_count: usize) {
                 cert,
                 priv_key,
                 peers,
+                protocols: None,
+                cypher_suits: None,
             };
             Config { network }
         };

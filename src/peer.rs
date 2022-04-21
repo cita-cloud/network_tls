@@ -25,8 +25,7 @@ use tokio::time;
 use tokio_stream::Stream;
 use tokio_stream::StreamExt;
 
-use tokio_rustls::rustls::ClientConfig;
-use tokio_rustls::webpki::DNSNameRef;
+use tokio_rustls::rustls::{ClientConfig, ServerName};
 use tokio_rustls::TlsConnector;
 
 use futures::future::poll_fn;
@@ -209,14 +208,14 @@ impl Peer {
                     let port = self.port;
                     info!(peer = %self.domain, host = %host, port = %port, "connecting..");
 
-                    let domain = DNSNameRef::try_from_ascii_str(&self.domain).unwrap().to_owned();
+                    let domain = ServerName::try_from(self.domain.as_str()).unwrap();
                     let tls_config = self.tls_config.clone();
 
                     let handle = tokio::spawn(async move {
                         let connector = TlsConnector::from(tls_config);
 
                         let tcp = TcpStream::connect((host.as_str(), port)).await?;
-                        connector.connect(domain.as_ref(), tcp).await
+                        connector.connect(domain, tcp).await
                     });
 
                     pending_conn.replace(handle);

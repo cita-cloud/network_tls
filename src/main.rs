@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod anchor;
 mod codec;
 mod config;
 mod error;
 mod health_check;
 mod peer;
 mod server;
+mod util;
 
 use std::path::PathBuf;
 
