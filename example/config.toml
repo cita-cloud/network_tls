@@ -23,8 +23,8 @@ SXkv+JX2GS5T9YzC0rEqO8dQvpEdSM+fd1X2yAIgXyeogDwnZIxStL+3LgAldvNp\r
 KRsCHb+OZ93Kl3YMMNU=\r
 -----END CERTIFICATE-----\r
 """
-grpc_port = 50000
-listen_port = 40000
+grpc_port = 51234
+listen_port = 41234
 priv_key = """
 -----BEGIN PRIVATE KEY-----\r
 MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgYJlUB48YHEC4Gj+c\r
