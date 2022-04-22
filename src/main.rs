@@ -21,12 +21,10 @@ mod peer;
 mod server;
 mod util;
 
-use std::path::PathBuf;
-
-use clap::{Arg, Command};
-
-use crate::config::load_config;
+use crate::config::NetworkConfig;
 use crate::server::Server;
+use clap::{Arg, Command};
+use std::path::PathBuf;
 
 fn main() {
     let run_cmd = Command::new("run")
@@ -92,7 +90,7 @@ fn main() {
     match matches.subcommand() {
         Some(("run", m)) => {
             let path = m.value_of("config").unwrap();
-            let config = load_config(path).unwrap();
+            let config = NetworkConfig::new(path);
 
             let log_dir = m.value_of("log-dir");
             let log_file_name = m.value_of("log-file-name");

@@ -27,7 +27,10 @@ tracing-appender = "0.2"
 tentacle-multiaddr = "0.3"
 parking_lot = "0.12"
 md5 = "0.7"
-cita_cloud_proto = { git = "https://github.com/cita-cloud/cita_cloud_proto" }
+
+cloud-util = { git = "https://github.com/cita-cloud/cloud-util.git" }
+cita_cloud_proto = { git = "https://github.com/cita-cloud/cita_cloud_proto.git" }
+status_code = { package = "cloud-code", git = "https://github.com/cita-cloud/status_code.git" }
 
 [build-dependencies]
 tonic-build = "0.5"

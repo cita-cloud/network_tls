@@ -78,7 +78,7 @@ pub fn load_certs(cert_str: &str) -> Vec<Certificate> {
         .collect()
 }
 
-fn load_private_key(key_str: &str) -> PrivateKey {
+pub fn load_private_key(key_str: &str) -> PrivateKey {
     let mut reader = BufReader::new(key_str.as_bytes());
     let rsa_keys = rsa_private_keys(&mut reader).expect("file contains invalid rsa private key");
 

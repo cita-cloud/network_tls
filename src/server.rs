@@ -49,7 +49,7 @@ use tokio_rustls::{
     TlsAcceptor,
 };
 use tonic::transport::{Channel, Endpoint};
-use tonic::{Request, Response};
+use tonic::{Request, Response, Status};
 use tracing::{debug, info, trace, warn};
 use x509_parser::extensions::GeneralName;
 use x509_parser::prelude::X509Certificate;
@@ -412,9 +412,7 @@ impl NetworkService for CitaCloudNetworkServiceServer {
                     .send_msg(msg.clone());
             }
         }
-
-        let ok = StatusCode { code: 0 };
-        Ok(Response::new(ok))
+        Ok(Response::new(status_code::StatusCode::Success.into()))
     }
 
     async fn broadcast(
@@ -434,8 +432,7 @@ impl NetworkService for CitaCloudNetworkServiceServer {
                 .send_msg(msg.clone());
         }
 
-        let ok = StatusCode { code: 0 };
-        Ok(Response::new(ok))
+        Ok(Response::new(status_code::StatusCode::Success.into()))
     }
 
     async fn get_network_status(
@@ -472,8 +469,7 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         let mut dispatch_table = self.dispatch_table.write();
         dispatch_table.insert(module_name, client);
 
-        let ok = StatusCode { code: 0 };
-        Ok(Response::new(ok))
+        Ok(Response::new(status_code::StatusCode::Success.into()))
     }
 
     async fn add_node(
@@ -481,7 +477,10 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         request: Request<NodeNetInfo>,
     ) -> Result<Response<StatusCode>, tonic::Status> {
         let multiaddr = request.into_inner().multi_address;
-        let (host, port, domain) = parse_multiaddr(&multiaddr)?;
+        let (host, port, domain) = parse_multiaddr(&multiaddr).ok_or_else(|| {
+            warn!(origin_str = %multiaddr, "parse_multiaddr: not a valid tls multi-address:");
+            Status::invalid_argument(status_code::StatusCode::MultiAddrParseError.to_string())
+        })?;
         info!(
             multiaddr = %multiaddr,
             host = %host, port = %port, domain = %domain,
@@ -491,11 +490,13 @@ impl NetworkService for CitaCloudNetworkServiceServer {
         let mut guard = self.peers.write();
         if guard.get_connected_peers().contains(&domain) {
             //add a connected peer
-            return Ok(Response::new(StatusCode { code: 405 }));
+            return Ok(Response::new(
+                status_code::StatusCode::AddExistedPeer.into(),
+            ));
         }
         if guard.get_known_peers().contains_key(&domain) {
             //add a known peer which is already trying to connect, return success
-            return Ok(Response::new(StatusCode { code: 0 }));
+            return Ok(Response::new(status_code::StatusCode::Success.into()));
         }
 
         let handle = Peer::init(
@@ -516,7 +517,7 @@ impl NetworkService for CitaCloudNetworkServiceServer {
             "peer added: "
         );
 
-        Ok(Response::new(StatusCode { code: 0 }))
+        Ok(Response::new(status_code::StatusCode::Success.into()))
     }
 
     async fn get_peers_net_info(
@@ -575,46 +576,43 @@ impl NetworkMsgDispatcher {
     }
 }
 
-fn parse_multiaddr(s: &str) -> Result<(String, u16, String), tonic::Status> {
-    let multiaddr = s
-        .parse::<MultiAddr>()
-        .map_err(|e| tonic::Status::invalid_argument(format!("parse multiaddr failed: `{}`", e)))?;
+fn parse_multiaddr(s: &str) -> Option<(String, u16, String)> {
+    let multiaddr = s.parse::<MultiAddr>().ok()?;
 
-    let mut host: Option<String> = None;
-    let mut port: Option<u16> = None;
-    let mut domain: Option<String> = None;
-    for ptcl in multiaddr.iter() {
-        match ptcl {
-            Protocol::Dns4(dns4) => {
-                host.replace(dns4.into());
+    let mut iter = multiaddr.iter().peekable();
+
+    while iter.peek().is_some() {
+        match iter.peek() {
+            Some(Protocol::Ip4(_))
+            | Some(Protocol::Ip6(_) | Protocol::Dns4(_) | Protocol::Dns6(_)) => (),
+            _ => {
+                // ignore is true
+                let _ignore = iter.next();
+                continue;
             }
-            Protocol::Dns6(dns6) => {
-                host.replace(dns6.into());
+        }
+
+        let proto1 = iter.next()?;
+        let proto2 = iter.next()?;
+        let proto3 = iter.next()?;
+
+        match (proto1, proto2, proto3) {
+            (Protocol::Ip4(ip), Protocol::Tcp(port), Protocol::Tls(d)) => {
+                return Some((ip.to_string(), port, d.to_string()));
             }
-            Protocol::Ip4(ipv4) => {
-                host.replace(ipv4.to_string());
+            (Protocol::Ip6(ip), Protocol::Tcp(port), Protocol::Tls(d)) => {
+                return Some((ip.to_string(), port, d.to_string()));
             }
-            Protocol::Ip6(ipv6) => {
-                host.replace(ipv6.to_string());
+            (Protocol::Dns4(ip), Protocol::Tcp(port), Protocol::Tls(d)) => {
+                return Some((ip.to_string(), port, d.to_string()));
             }
-            Protocol::Tcp(p) => {
-                port.replace(p);
-            }
-            Protocol::Tls(d) => {
-                domain.replace(d.into());
+            (Protocol::Dns6(ip), Protocol::Tcp(port), Protocol::Tls(d)) => {
+                return Some((ip.to_string(), port, d.to_string()));
             }
             _ => (),
         }
     }
-
-    let host =
-        host.ok_or_else(|| tonic::Status::invalid_argument("host not present in multiaddr"))?;
-    let port =
-        port.ok_or_else(|| tonic::Status::invalid_argument("port not present in multiaddr"))?;
-    let domain =
-        domain.ok_or_else(|| tonic::Status::invalid_argument("domain not present in multiaddr"))?;
-
-    Ok((host, port, domain))
+    None
 }
 
 fn build_multiaddr(host: &str, port: u16, domain: &str) -> String {
@@ -704,6 +702,6 @@ mod test {
 
     #[test]
     fn test_parse_multiaddr() {
-        assert!(parse_multiaddr("/ip4/127.0.0.1/tcp/5678/tls/fy").is_ok());
+        assert!(parse_multiaddr("/ip4/127.0.0.1/tcp/5678/tls/fy").is_some());
     }
 }

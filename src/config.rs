@@ -13,21 +13,18 @@
 // limitations under the License.
 
 use crate::error::Error;
-
-use std::fs;
-use std::io::prelude::*;
-use std::path::Path;
-
+use cloud_util::common::read_toml;
+use md5::{compute, Digest};
 use rcgen::BasicConstraints;
 use rcgen::Certificate;
 use rcgen::CertificateParams;
 use rcgen::IsCa;
 use rcgen::KeyPair;
 use rcgen::PKCS_ECDSA_P256_SHA256;
-
 use serde::{Deserialize, Serialize};
-
-use md5::{compute, Digest};
+use std::fs;
+use std::io::prelude::*;
+use std::path::Path;
 
 fn default_reconnect_timeout() -> u64 {
     5
@@ -41,35 +38,55 @@ fn default_try_hot_update_interval() -> u64 {
 pub struct PeerConfig {
     pub host: String,
     pub port: u16,
-
-    // TODO: is this name suitable?
     pub domain: String,
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(default)]
 pub struct NetworkConfig {
+    // server grpc port, as network_port
     pub grpc_port: u16,
+    // p2p port
     pub listen_port: u16,
-
-    #[serde(default = "default_reconnect_timeout")]
-    pub reconnect_timeout: u64, // in seconds
-
-    #[serde(default = "default_try_hot_update_interval")]
-    pub try_hot_update_interval: u64, // in seconds
-
+    // node reconnect pod, in seconds
+    pub reconnect_timeout: u64,
+    // config hot update interval, in senconds
+    pub try_hot_update_interval: u64,
+    // CA certification, raw string
     pub ca_cert: String,
-
+    // Server certification, raw string
     pub cert: String,
-    // TODO: better security
+    // Server certification private key
     pub priv_key: String,
-
-    pub(crate) protocols: Option<Vec<String>>,
-    pub(crate) cypher_suits: Option<Vec<String>>,
-
-    #[serde(default)]
-    // https://github.com/alexcrichton/toml-rs/issues/258
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    // tls version, choice "1.2" or "1.3"
+    pub protocols: Option<Vec<String>>,
+    // cypher suits
+    pub cypher_suits: Option<Vec<String>>,
+    // peers net config info
     pub peers: Vec<PeerConfig>,
+}
+
+impl NetworkConfig {
+    pub fn new(config_str: &str) -> Self {
+        read_toml(config_str, "network_tls")
+    }
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self {
+            grpc_port: 50000,
+            listen_port: 40000,
+            reconnect_timeout: 5,
+            try_hot_update_interval: 60,
+            ca_cert: "".to_string(),
+            cert: "".to_string(),
+            priv_key: "".to_string(),
+            protocols: None,
+            cypher_suits: None,
+            peers: vec![],
+        }
+    }
 }
 
 // a wrapper
@@ -170,5 +187,22 @@ pub fn calculate_md5(path: impl AsRef<Path>) -> Result<Digest, Error> {
         Ok(compute(s))
     } else {
         Err(Error::FileNotExist)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NetworkConfig;
+    use crate::util::{load_certs, load_private_key};
+
+    #[test]
+    fn basic_test() {
+        let config = NetworkConfig::new("example/config.toml");
+        load_certs(&config.ca_cert);
+        load_certs(&config.cert);
+        load_private_key(&config.priv_key);
+
+        assert_eq!(config.grpc_port, 51234);
+        assert_eq!(config.listen_port, 41234);
     }
 }
