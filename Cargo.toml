@@ -1,6 +1,6 @@
 [package]
 name = "network"
-version = "6.4.0"
+version = "6.5.0"
 authors = ["Rivtower Technologies <contact@rivtower.com>"]
 edition = "2021"
 
@@ -28,9 +28,9 @@ tentacle-multiaddr = "0.3"
 parking_lot = "0.12"
 md5 = "0.7"
 
-cloud-util = { git = "https://github.com/cita-cloud/cloud-util.git" }
-cita_cloud_proto = { git = "https://github.com/cita-cloud/cita_cloud_proto.git" }
-status_code = { package = "cloud-code", git = "https://github.com/cita-cloud/status_code.git" }
+cloud-util = "0.3.0"
+cita_cloud_proto = "=6.5.0"
+status_code = { package = "cloud-code", version = "0.3.0" }
 
 [build-dependencies]
 tonic-build = "0.5"
